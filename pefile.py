@@ -821,6 +821,16 @@ class PEFormatError(Exception):
         return repr(self.value)
 
 
+class RelocationError(PEFormatError):
+    """Raised when a relocation cannot be applied to an image.
+
+    This happens when the image has no (parseable) base relocation
+    directory, a relocation entry targets an RVA that cannot be mapped or
+    lies outside the image's boundaries, or the relocation table itself is
+    corrupt.
+    """
+
+
 class Dump:
     """Convenience class for dumping the PE information."""
 
@@ -6303,67 +6313,78 @@ class PE:
         Normally, sections with values beyond this range are just there to confuse
         tools. This is a common trick to see in packed executables.
 
-        If the 'ImageBase' optional argument is supplied, the file's relocations
-        will be applied to the image by calling the 'relocate_image()' method. Beware
-        that the relocation information is applied permanently.
+        If the 'ImageBase' optional argument is supplied, the file's
+        relocations are applied through :meth:`get_relocated_image`, so this
+        instance is never modified: the rebasing happens on a throwaway view
+        and only the returned, memory-mapped bytes reflect the new base.
         """
 
-        # Rebase if requested
+        # Rebase on an isolated view so this instance stays untouched.
+        target_pe = self
+        relocated_pe = None
         if ImageBase is not None:
-            # Keep a copy of the image's data before modifying it by rebasing it
-            original_data = self.__data__
+            try:
+                relocated_pe = self.get_relocated_image(ImageBase)
+                target_pe = relocated_pe
+            except RelocationError as excp:
+                # Preserve the historical, lenient behavior for images that
+                # cannot be relocated (for example no relocation directory):
+                # return the memory image at the original base.
+                self.__warnings.append(
+                    f"Could not rebase the memory-mapped image: {excp}"
+                )
 
-            self.relocate_image(ImageBase)
+        try:
+            # Collect all sections in one code block
+            mapped_data = target_pe.header
+            for section in target_pe.sections:
+                # Miscellaneous integrity tests.
+                # Some packers will set these to bogus values to confuse tools.
 
-        # Collect all sections in one code block
-        mapped_data = self.header
-        for section in self.sections:
-            # Miscellaneous integrity tests.
-            # Some packers will set these to bogus values to confuse tools.
+                if section.Misc_VirtualSize == 0 and section.SizeOfRawData == 0:
+                    continue
 
-            if section.Misc_VirtualSize == 0 and section.SizeOfRawData == 0:
-                continue
+                srd = section.SizeOfRawData
+                prd = target_pe.adjust_PointerToRawData(section.PointerToRawData)
+                VirtualAddress_adj = target_pe.adjust_SectionAlignment(
+                    section.VirtualAddress,
+                    target_pe.OPTIONAL_HEADER.SectionAlignment,
+                    target_pe.OPTIONAL_HEADER.FileAlignment,
+                )
 
-            srd = section.SizeOfRawData
-            prd = self.adjust_PointerToRawData(section.PointerToRawData)
-            VirtualAddress_adj = self.adjust_SectionAlignment(
-                section.VirtualAddress,
-                self.OPTIONAL_HEADER.SectionAlignment,
-                self.OPTIONAL_HEADER.FileAlignment,
-            )
+                if (
+                    srd > len(target_pe.__data__)
+                    or prd > len(target_pe.__data__)
+                    or srd + prd > len(target_pe.__data__)
+                    or VirtualAddress_adj >= max_virtual_address
+                ):
+                    continue
 
-            if (
-                srd > len(self.__data__)
-                or prd > len(self.__data__)
-                or srd + prd > len(self.__data__)
-                or VirtualAddress_adj >= max_virtual_address
-            ):
-                continue
+                padding_length = VirtualAddress_adj - len(mapped_data)
 
-            padding_length = VirtualAddress_adj - len(mapped_data)
+                if padding_length > 0:
+                    mapped_data += b"\0" * padding_length
+                elif padding_length < 0:
+                    mapped_data = mapped_data[:padding_length]
 
-            if padding_length > 0:
-                mapped_data += b"\0" * padding_length
-            elif padding_length < 0:
-                mapped_data = mapped_data[:padding_length]
-
-            section_data = section.get_data()
-            virtual_size = section.Misc_VirtualSize
-            if virtual_size and len(section_data) != virtual_size:
-                # Only Misc_VirtualSize bytes belong in the mapped view.
-                if virtual_size < len(section_data):
-                    # VirtualSize < SizeOfRawData: the extra disk bytes are
-                    # file-alignment padding the OS loader discards.
-                    section_data = section_data[:virtual_size]
-                elif virtual_size > len(section_data):
-                    # VirtualSize > SizeOfRawData: the gap is BSS and must be
-                    # zero-padded in the mapped view.
-                    section_data += b"\x00" * (virtual_size - len(section_data))
-            mapped_data += section_data
-
-        # If the image was rebased, restore it to its original form
-        if ImageBase is not None:
-            self.__data__ = original_data
+                section_data = section.get_data()
+                virtual_size = section.Misc_VirtualSize
+                if virtual_size and len(section_data) != virtual_size:
+                    # Only Misc_VirtualSize bytes belong in the mapped view.
+                    if virtual_size < len(section_data):
+                        # VirtualSize < SizeOfRawData: the extra disk bytes are
+                        # file-alignment padding the OS loader discards.
+                        section_data = section_data[:virtual_size]
+                    elif virtual_size > len(section_data):
+                        # VirtualSize > SizeOfRawData: the gap is BSS and must
+                        # be zero-padded in the mapped view.
+                        section_data += b"\x00" * (
+                            virtual_size - len(section_data)
+                        )
+                mapped_data += section_data
+        finally:
+            if relocated_pe is not None:
+                relocated_pe.close()
 
         return mapped_data
 
@@ -7476,260 +7497,356 @@ class PE:
             ):
                 self.set_data_bytes(section_data_start, section.get_data())
 
-    def relocate_image(self, new_ImageBase):
-        """Apply the relocation information to the image using the provided image base.
+    def get_relocated_image(self, new_ImageBase):
+        """Return a new, relocated PE view without modifying this instance.
 
-        This method will apply the relocation information to the image. Given the new
-        base, all the relocations will be processed and both the raw data and the
-        section's data will be fixed accordingly.
-        The resulting image can be retrieved as well through the method:
+        This is the non-destructive entry point for analyzing the same image
+        at multiple base addresses. A fresh :class:`PE` instance is built from
+        a private copy of this image's bytes and the base relocations are
+        applied to that copy only; this instance (its raw bytes, section data,
+        ``OPTIONAL_HEADER.ImageBase`` and any parsed directory structures) is
+        guaranteed to remain untouched.
 
-            get_memory_mapped_image()
+        Because every call rebuilds the view from the current image bytes,
+        consecutive requests for different bases are always computed
+        independently from the same original state. The returned object owns
+        its data and may be inspected or closed freely.
 
-        In order to get something that would more closely match what could be found in
-        memory once the Windows loader finished its work.
+        Raises :class:`RelocationError` if the image has no (parseable) base
+        relocation directory, a relocation targets an RVA that cannot be
+        mapped or lies outside the image, or the relocation table is corrupt.
+        On failure this instance is left unchanged, and a later call behaves
+        exactly like parsing the original file again.
         """
+
+        relocated = PE(data=bytes(self.__data__), fast_load=True)
+        try:
+            relocated._relocate_image_in_place(new_ImageBase)
+        except Exception:
+            relocated.close()
+            raise
+
+        return relocated
+
+    def relocate_image(self, new_ImageBase):
+        """Apply the relocation information to this image in place.
+
+        .. warning::
+            This mutates the current instance permanently: the raw data, the
+            sections' data, ``OPTIONAL_HEADER.ImageBase`` and parsed directory
+            structures are all modified. For static analysis across several
+            base addresses prefer :meth:`get_relocated_image`, which returns an
+            isolated, non-destructive view and never changes this object.
+
+        Given the new base, all the relocations are processed and both the raw
+        data and the section's data are fixed accordingly. The resulting image
+        can then be retrieved through :meth:`get_memory_mapped_image` to obtain
+        something closer to what the Windows loader would produce in memory.
+
+        For backwards compatibility this method is lenient: if a relocation
+        cannot be applied (for example an out-of-bounds target) the problem is
+        recorded as a warning and processing stops, leaving the partially
+        relocated image in place rather than raising.
+        """
+
+        try:
+            self._relocate_image_in_place(new_ImageBase)
+        except RelocationError as excp:
+            self.__warnings.append(
+                "Relocating image failed, the image may be partially "
+                f"relocated: {excp}"
+            )
+
+    def _relocate_image_in_place(self, new_ImageBase):
+        """Strictly apply the base relocations to this instance.
+
+        Unlike :meth:`relocate_image`, every problem is fatal and raises
+        :class:`RelocationError`. The method only runs on throwaway copies
+        created by :meth:`get_relocated_image`, so a failure halfway through
+        simply discards the copy and can never corrupt the original sample.
+        """
+
+        def read_word(rva):
+            value = self.get_word_at_rva(rva)
+            if value is None:
+                raise RelocationError(
+                    f"Cannot read word at relocation target RVA {rva:#x}"
+                )
+            return value
+
+        def write_word(rva, value):
+            if not self.set_word_at_rva(rva, value & 0xFFFF):
+                raise RelocationError(
+                    f"Cannot write word at relocation target RVA {rva:#x}"
+                )
+
+        def read_dword(rva):
+            value = self.get_dword_at_rva(rva)
+            if value is None:
+                raise RelocationError(
+                    f"Cannot read dword at relocation target RVA {rva:#x}"
+                )
+            return value
+
+        def write_dword(rva, value):
+            if not self.set_dword_at_rva(rva, value):
+                raise RelocationError(
+                    f"Cannot write dword at relocation target RVA {rva:#x}"
+                )
+
+        def read_qword(rva):
+            value = self.get_qword_at_rva(rva)
+            if value is None:
+                raise RelocationError(
+                    f"Cannot read qword at relocation target RVA {rva:#x}"
+                )
+            return value
+
+        def write_qword(rva, value):
+            if not self.set_qword_at_rva(rva, value):
+                raise RelocationError(
+                    f"Cannot write qword at relocation target RVA {rva:#x}"
+                )
 
         relocation_difference = new_ImageBase - self.OPTIONAL_HEADER.ImageBase
 
-        if (
+        has_reloc_directory = (
             len(self.OPTIONAL_HEADER.DATA_DIRECTORY) >= 6
             and self.OPTIONAL_HEADER.DATA_DIRECTORY[5].Size
+        )
+        if has_reloc_directory and not hasattr(
+            self, "DIRECTORY_ENTRY_BASERELOC"
         ):
-            if not hasattr(self, "DIRECTORY_ENTRY_BASERELOC"):
-                self.parse_data_directories(
-                    directories=[DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_BASERELOC"]]
-                )
-            if not hasattr(self, "DIRECTORY_ENTRY_BASERELOC"):
-                self.__warnings.append(
-                    "Relocating image but PE does not have (or pefile cannot "
-                    "parse) a DIRECTORY_ENTRY_BASERELOC"
-                )
-            else:
-                for reloc in self.DIRECTORY_ENTRY_BASERELOC:
-                    # We iterate with an index because if the relocation is of type
-                    # IMAGE_REL_BASED_HIGHADJ we need to also process the next entry
-                    # at once and skip it for the next iteration
-                    entry_idx = 0
-                    while entry_idx < len(reloc.entries):
-                        entry = reloc.entries[entry_idx]
-                        entry_idx += 1
+            self.parse_data_directories(
+                directories=[DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_BASERELOC"]]
+            )
+        if not hasattr(self, "DIRECTORY_ENTRY_BASERELOC"):
+            raise RelocationError(
+                "PE does not have (or pefile cannot parse) a "
+                "DIRECTORY_ENTRY_BASERELOC"
+            )
 
-                        if entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_ABSOLUTE"]:
-                            # Nothing to do for this type of relocation
-                            pass
+        for reloc in self.DIRECTORY_ENTRY_BASERELOC:
+            # We iterate with an index because if the relocation is of type
+            # IMAGE_REL_BASED_HIGHADJ we need to also process the next entry
+            # at once and skip it for the next iteration
+            entry_idx = 0
+            while entry_idx < len(reloc.entries):
+                entry = reloc.entries[entry_idx]
+                entry_idx += 1
 
-                        elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_HIGH"]:
-                            # Fix the high 16-bits of a relocation
-                            #
-                            # Add high 16-bits of relocation_difference to the
-                            # 16-bit value at RVA=entry.rva
-                            self.set_word_at_rva(
-                                entry.rva,
-                                (
-                                    self.get_word_at_rva(entry.rva)
-                                    + relocation_difference
-                                    >> 16
-                                )
-                                & 0xFFFF,
-                            )
+                if entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_ABSOLUTE"]:
+                    # Nothing to do for this type of relocation
+                    pass
 
-                        elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_LOW"]:
-                            # Fix the low 16-bits of a relocation
-                            #
-                            # Add low 16 bits of relocation_difference to the 16-bit
-                            # value at RVA=entry.rva
-                            self.set_word_at_rva(
-                                entry.rva,
-                                (
-                                    self.get_word_at_rva(entry.rva)
-                                    + relocation_difference
-                                )
-                                & 0xFFFF,
-                            )
+                elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_HIGH"]:
+                    # Fix the high 16-bits of a relocation
+                    #
+                    # Add high 16-bits of relocation_difference to the
+                    # 16-bit value at RVA=entry.rva
+                    write_word(
+                        entry.rva,
+                        (
+                            read_word(entry.rva) + relocation_difference >> 16
+                        ),
+                    )
 
-                        elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_HIGHLOW"]:
-                            # Handle all high and low parts of a 32-bit relocation
-                            #
-                            # Add relocation_difference to the value at RVA=entry.rva
-                            self.set_dword_at_rva(
-                                entry.rva,
-                                self.get_dword_at_rva(entry.rva)
-                                + relocation_difference,
-                            )
+                elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_LOW"]:
+                    # Fix the low 16-bits of a relocation
+                    #
+                    # Add low 16 bits of relocation_difference to the 16-bit
+                    # value at RVA=entry.rva
+                    write_word(
+                        entry.rva,
+                        (read_word(entry.rva) + relocation_difference),
+                    )
 
-                        elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_HIGHADJ"]:
-                            # Fix the high 16-bits of a relocation and adjust
-                            #
-                            # Add high 16-bits of relocation_difference to the 32-bit
-                            # value composed from the (16-bit value at
-                            # RVA=entry.rva)<<16 plus the 16-bit value at the next
-                            # relocation entry.
+                elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_HIGHLOW"]:
+                    # Handle all high and low parts of a 32-bit relocation
+                    #
+                    # Add relocation_difference to the value at RVA=entry.rva
+                    write_dword(
+                        entry.rva,
+                        read_dword(entry.rva) + relocation_difference,
+                    )
 
-                            # If the next entry is beyond the array's limits,
-                            # abort... the table is corrupt
-                            if entry_idx == len(reloc.entries):
-                                break
+                elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_HIGHADJ"]:
+                    # Fix the high 16-bits of a relocation and adjust
+                    #
+                    # Add high 16-bits of relocation_difference to the 32-bit
+                    # value composed from the (16-bit value at
+                    # RVA=entry.rva)<<16 plus the 16-bit value at the next
+                    # relocation entry.
 
-                            next_entry = reloc.entries[entry_idx]
-                            entry_idx += 1
-                            self.set_word_at_rva(
-                                entry.rva,
-                                (
-                                    (self.get_word_at_rva(entry.rva) << 16)
-                                    + next_entry.rva
-                                    + relocation_difference
-                                    & 0xFFFF0000
-                                )
-                                >> 16,
-                            )
+                    # If the next entry is beyond the array's limits,
+                    # the table is corrupt
+                    if entry_idx == len(reloc.entries):
+                        raise RelocationError(
+                            "IMAGE_REL_BASED_HIGHADJ relocation at RVA "
+                            f"{entry.rva:#x} is missing its trailing entry"
+                        )
 
-                        elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_DIR64"]:
-                            # Apply the difference to the 64-bit value at the offset
-                            # RVA=entry.rva
+                    next_entry = reloc.entries[entry_idx]
+                    entry_idx += 1
+                    write_word(
+                        entry.rva,
+                        (
+                            (read_word(entry.rva) << 16)
+                            + next_entry.rva
+                            + relocation_difference
+                            & 0xFFFF0000
+                        )
+                        >> 16,
+                    )
 
-                            self.set_qword_at_rva(
-                                entry.rva,
-                                self.get_qword_at_rva(entry.rva)
-                                + relocation_difference,
-                            )
+                elif entry.type == RELOCATION_TYPE["IMAGE_REL_BASED_DIR64"]:
+                    # Apply the difference to the 64-bit value at the offset
+                    # RVA=entry.rva
+                    write_qword(
+                        entry.rva,
+                        read_qword(entry.rva) + relocation_difference,
+                    )
 
-            self.OPTIONAL_HEADER.ImageBase = new_ImageBase
+        self.OPTIONAL_HEADER.ImageBase = new_ImageBase
+        self._adjust_directory_addresses(relocation_difference)
 
-            # correct VA (virtual address) occurrences in directory information
-            if hasattr(self, "DIRECTORY_ENTRY_IMPORT"):
-                for dll in self.DIRECTORY_ENTRY_IMPORT:
-                    for func in dll.imports:
-                        func.address += relocation_difference
-            if hasattr(self, "DIRECTORY_ENTRY_TLS"):
-                self.DIRECTORY_ENTRY_TLS.struct.StartAddressOfRawData += (
+    def _adjust_directory_addresses(self, relocation_difference):
+        """Add the base difference to absolute addresses held in directories."""
+
+        # correct VA (virtual address) occurrences in directory information
+        if hasattr(self, "DIRECTORY_ENTRY_IMPORT"):
+            for dll in self.DIRECTORY_ENTRY_IMPORT:
+                for func in dll.imports:
+                    func.address += relocation_difference
+        if hasattr(self, "DIRECTORY_ENTRY_TLS"):
+            self.DIRECTORY_ENTRY_TLS.struct.StartAddressOfRawData += (
+                relocation_difference
+            )
+            self.DIRECTORY_ENTRY_TLS.struct.EndAddressOfRawData += (
+                relocation_difference
+            )
+            self.DIRECTORY_ENTRY_TLS.struct.AddressOfIndex += relocation_difference
+            self.DIRECTORY_ENTRY_TLS.struct.AddressOfCallBacks += (
+                relocation_difference
+            )
+        if hasattr(self, "DIRECTORY_ENTRY_LOAD_CONFIG"):
+            load_config = self.DIRECTORY_ENTRY_LOAD_CONFIG.struct
+            if (
+                hasattr(load_config, "LockPrefixTable")
+                and load_config.LockPrefixTable
+            ):
+                load_config.LockPrefixTable += relocation_difference
+            if hasattr(load_config, "EditList") and load_config.EditList:
+                load_config.EditList += relocation_difference
+            if (
+                hasattr(load_config, "SecurityCookie")
+                and load_config.SecurityCookie
+            ):
+                load_config.SecurityCookie += relocation_difference
+            if (
+                hasattr(load_config, "SEHandlerTable")
+                and load_config.SEHandlerTable
+            ):
+                load_config.SEHandlerTable += relocation_difference
+            if (
+                hasattr(load_config, "GuardCFCheckFunctionPointer")
+                and load_config.GuardCFCheckFunctionPointer
+            ):
+                load_config.GuardCFCheckFunctionPointer += relocation_difference
+            if (
+                hasattr(load_config, "GuardCFDispatchFunctionPointer")
+                and load_config.GuardCFDispatchFunctionPointer
+            ):
+                load_config.GuardCFDispatchFunctionPointer += relocation_difference
+            if (
+                hasattr(load_config, "GuardCFFunctionTable")
+                and load_config.GuardCFFunctionTable
+            ):
+                load_config.GuardCFFunctionTable += relocation_difference
+            if (
+                hasattr(load_config, "GuardAddressTakenIatEntryTable")
+                and load_config.GuardAddressTakenIatEntryTable
+            ):
+                load_config.GuardAddressTakenIatEntryTable += relocation_difference
+            if (
+                hasattr(load_config, "GuardLongJumpTargetTable")
+                and load_config.GuardLongJumpTargetTable
+            ):
+                load_config.GuardLongJumpTargetTable += relocation_difference
+            if (
+                hasattr(load_config, "DynamicValueRelocTable")
+                and load_config.DynamicValueRelocTable
+            ):
+                load_config.DynamicValueRelocTable += relocation_difference
+            if (
+                self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE_PLUS
+                and hasattr(load_config, "CHPEMetadataPointer")
+                and load_config.CHPEMetadataPointer
+            ):
+                load_config.CHPEMetadataPointer += relocation_difference
+            if (
+                hasattr(load_config, "GuardRFFailureRoutine")
+                and load_config.GuardRFFailureRoutine
+            ):
+                load_config.GuardRFFailureRoutine += relocation_difference
+            if (
+                hasattr(load_config, "GuardRFFailureRoutineFunctionPointer")
+                and load_config.GuardRFFailureRoutineFunctionPointer
+            ):
+                load_config.GuardRFVerifyStackPointerFunctionPointer += (
                     relocation_difference
                 )
-                self.DIRECTORY_ENTRY_TLS.struct.EndAddressOfRawData += (
+            if (
+                hasattr(load_config, "GuardRFVerifyStackPointerFunctionPointer")
+                and load_config.GuardRFVerifyStackPointerFunctionPointer
+            ):
+                load_config.GuardRFVerifyStackPointerFunctionPointer += (
                     relocation_difference
                 )
-                self.DIRECTORY_ENTRY_TLS.struct.AddressOfIndex += relocation_difference
-                self.DIRECTORY_ENTRY_TLS.struct.AddressOfCallBacks += (
+            if (
+                hasattr(load_config, "EnclaveConfigurationPointer")
+                and load_config.EnclaveConfigurationPointer
+            ):
+                load_config.EnclaveConfigurationPointer += relocation_difference
+            if (
+                hasattr(load_config, "VolatileMetadataPointer")
+                and load_config.VolatileMetadataPointer
+            ):
+                load_config.VolatileMetadataPointer += relocation_difference
+            if (
+                hasattr(load_config, "GuardEHContinuationTable")
+                and load_config.GuardEHContinuationTable
+            ):
+                load_config.GuardEHContinuationTable += relocation_difference
+            if (
+                hasattr(load_config, "GuardXFGCheckFunctionPointer")
+                and load_config.GuardXFGCheckFunctionPointer
+            ):
+                load_config.GuardXFGCheckFunctionPointer += relocation_difference
+            if (
+                hasattr(load_config, "GuardXFGDispatchFunctionPointer")
+                and load_config.GuardXFGDispatchFunctionPointer
+            ):
+                load_config.GuardXFGDispatchFunctionPointer += relocation_difference
+            if (
+                hasattr(load_config, "GuardXFGTableDispatchFunctionPointer")
+                and load_config.GuardXFGTableDispatchFunctionPointer
+            ):
+                load_config.GuardXFGTableDispatchFunctionPointer += (
                     relocation_difference
                 )
-            if hasattr(self, "DIRECTORY_ENTRY_LOAD_CONFIG"):
-                load_config = self.DIRECTORY_ENTRY_LOAD_CONFIG.struct
-                if (
-                    hasattr(load_config, "LockPrefixTable")
-                    and load_config.LockPrefixTable
-                ):
-                    load_config.LockPrefixTable += relocation_difference
-                if hasattr(load_config, "EditList") and load_config.EditList:
-                    load_config.EditList += relocation_difference
-                if (
-                    hasattr(load_config, "SecurityCookie")
-                    and load_config.SecurityCookie
-                ):
-                    load_config.SecurityCookie += relocation_difference
-                if (
-                    hasattr(load_config, "SEHandlerTable")
-                    and load_config.SEHandlerTable
-                ):
-                    load_config.SEHandlerTable += relocation_difference
-                if (
-                    hasattr(load_config, "GuardCFCheckFunctionPointer")
-                    and load_config.GuardCFCheckFunctionPointer
-                ):
-                    load_config.GuardCFCheckFunctionPointer += relocation_difference
-                if (
-                    hasattr(load_config, "GuardCFDispatchFunctionPointer")
-                    and load_config.GuardCFDispatchFunctionPointer
-                ):
-                    load_config.GuardCFDispatchFunctionPointer += relocation_difference
-                if (
-                    hasattr(load_config, "GuardCFFunctionTable")
-                    and load_config.GuardCFFunctionTable
-                ):
-                    load_config.GuardCFFunctionTable += relocation_difference
-                if (
-                    hasattr(load_config, "GuardAddressTakenIatEntryTable")
-                    and load_config.GuardAddressTakenIatEntryTable
-                ):
-                    load_config.GuardAddressTakenIatEntryTable += relocation_difference
-                if (
-                    hasattr(load_config, "GuardLongJumpTargetTable")
-                    and load_config.GuardLongJumpTargetTable
-                ):
-                    load_config.GuardLongJumpTargetTable += relocation_difference
-                if (
-                    hasattr(load_config, "DynamicValueRelocTable")
-                    and load_config.DynamicValueRelocTable
-                ):
-                    load_config.DynamicValueRelocTable += relocation_difference
-                if (
-                    self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE_PLUS
-                    and hasattr(load_config, "CHPEMetadataPointer")
-                    and load_config.CHPEMetadataPointer
-                ):
-                    load_config.CHPEMetadataPointer += relocation_difference
-                if (
-                    hasattr(load_config, "GuardRFFailureRoutine")
-                    and load_config.GuardRFFailureRoutine
-                ):
-                    load_config.GuardRFFailureRoutine += relocation_difference
-                if (
-                    hasattr(load_config, "GuardRFFailureRoutineFunctionPointer")
-                    and load_config.GuardRFFailureRoutineFunctionPointer
-                ):
-                    load_config.GuardRFVerifyStackPointerFunctionPointer += (
-                        relocation_difference
-                    )
-                if (
-                    hasattr(load_config, "GuardRFVerifyStackPointerFunctionPointer")
-                    and load_config.GuardRFVerifyStackPointerFunctionPointer
-                ):
-                    load_config.GuardRFVerifyStackPointerFunctionPointer += (
-                        relocation_difference
-                    )
-                if (
-                    hasattr(load_config, "EnclaveConfigurationPointer")
-                    and load_config.EnclaveConfigurationPointer
-                ):
-                    load_config.EnclaveConfigurationPointer += relocation_difference
-                if (
-                    hasattr(load_config, "VolatileMetadataPointer")
-                    and load_config.VolatileMetadataPointer
-                ):
-                    load_config.VolatileMetadataPointer += relocation_difference
-                if (
-                    hasattr(load_config, "GuardEHContinuationTable")
-                    and load_config.GuardEHContinuationTable
-                ):
-                    load_config.GuardEHContinuationTable += relocation_difference
-                if (
-                    hasattr(load_config, "GuardXFGCheckFunctionPointer")
-                    and load_config.GuardXFGCheckFunctionPointer
-                ):
-                    load_config.GuardXFGCheckFunctionPointer += relocation_difference
-                if (
-                    hasattr(load_config, "GuardXFGDispatchFunctionPointer")
-                    and load_config.GuardXFGDispatchFunctionPointer
-                ):
-                    load_config.GuardXFGDispatchFunctionPointer += relocation_difference
-                if (
-                    hasattr(load_config, "GuardXFGTableDispatchFunctionPointer")
-                    and load_config.GuardXFGTableDispatchFunctionPointer
-                ):
-                    load_config.GuardXFGTableDispatchFunctionPointer += (
-                        relocation_difference
-                    )
-                if (
-                    hasattr(load_config, "CastGuardOsDeterminedFailureMode")
-                    and load_config.CastGuardOsDeterminedFailureMode
-                ):
-                    load_config.CastGuardOsDeterminedFailureMode += (
-                        relocation_difference
-                    )
-                if (
-                    hasattr(load_config, "GuardMemcpyFunctionPointer")
-                    and load_config.GuardMemcpyFunctionPointer
-                ):
-                    load_config.GuardMemcpyFunctionPointer += relocation_difference
+            if (
+                hasattr(load_config, "CastGuardOsDeterminedFailureMode")
+                and load_config.CastGuardOsDeterminedFailureMode
+            ):
+                load_config.CastGuardOsDeterminedFailureMode += (
+                    relocation_difference
+                )
+            if (
+                hasattr(load_config, "GuardMemcpyFunctionPointer")
+                and load_config.GuardMemcpyFunctionPointer
+            ):
+                load_config.GuardMemcpyFunctionPointer += relocation_difference
 
     def verify_checksum(self):
         return self.OPTIONAL_HEADER.CheckSum == self.generate_checksum()
