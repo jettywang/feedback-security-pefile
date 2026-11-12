@@ -1,0 +1,967 @@
+[
+  {
+    "sample": "s0_baseline.exe",
+    "identity_warning": "CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.",
+    "pefile_view": {
+      "warnings": [],
+      "string_tables": [
+        {
+          "lang_key": "040904b0",
+          "entries": {
+            "CompanyName": "Acme Corp",
+            "FileDescription": "Legitimate updater",
+            "OriginalFilename": "acme_update.exe",
+            "FileVersion": "1.0.0.0"
+          }
+        }
+      ],
+      "translations": [
+        {
+          "key": "Translation",
+          "value": "0x0409 0x04b0"
+        }
+      ],
+      "parsed_blobs": 1,
+      "rt_version_name_nodes_on_disk": [
+        {
+          "name_id": 1,
+          "language_ids": [
+            1033
+          ]
+        }
+      ]
+    },
+    "evidence_view": {
+      "version_blobs": [
+        {
+          "blob_file_offset": 1112,
+          "blob_size": 472,
+          "string_tables": [
+            {
+              "index": 0,
+              "lang_key": "040904b0",
+              "header_file_offset": 1240,
+              "declared_length": 276,
+              "entries": [
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1270,
+                  "header_file_offset": 1264,
+                  "declared_wlength": 52,
+                  "declared_wvaluelength": 9,
+                  "value_file_offset": 1296,
+                  "value_per_declared_length": "Acme Corp",
+                  "value_full_nul_terminated": "Acme Corp",
+                  "available_words_in_block": 10,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileDescription",
+                  "key_file_offset": 1322,
+                  "header_file_offset": 1316,
+                  "declared_wlength": 80,
+                  "declared_wvaluelength": 18,
+                  "value_file_offset": 1356,
+                  "value_per_declared_length": "Legitimate updater",
+                  "value_full_nul_terminated": "Legitimate updater",
+                  "available_words_in_block": 20,
+                  "status": "ok"
+                },
+                {
+                  "key": "OriginalFilename",
+                  "key_file_offset": 1402,
+                  "header_file_offset": 1396,
+                  "declared_wlength": 72,
+                  "declared_wvaluelength": 15,
+                  "value_file_offset": 1436,
+                  "value_per_declared_length": "acme_update.exe",
+                  "value_full_nul_terminated": "acme_update.exe",
+                  "available_words_in_block": 16,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileVersion",
+                  "key_file_offset": 1474,
+                  "header_file_offset": 1468,
+                  "declared_wlength": 48,
+                  "declared_wvaluelength": 7,
+                  "value_file_offset": 1500,
+                  "value_per_declared_length": "1.0.0.0",
+                  "value_full_nul_terminated": "1.0.0.0",
+                  "available_words_in_block": 8,
+                  "status": "ok"
+                }
+              ]
+            }
+          ],
+          "translations": [
+            {
+              "key": "Translation",
+              "header_file_offset": 1548,
+              "payload_file_offset": 1580,
+              "declared_wvaluelength": 4,
+              "pairs": [
+                {
+                  "lang_id": 1033,
+                  "charset_id": 1200,
+                  "file_offset": 1580
+                }
+              ]
+            }
+          ],
+          "issues": [],
+          "fixed_file_offset": 1152,
+          "fixed_signature": 4277077181,
+          "resource_rva": 1112
+        }
+      ],
+      "issues": []
+    },
+    "discrepancies": []
+  },
+  {
+    "sample": "s1_lang_conflict.exe",
+    "identity_warning": "CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.",
+    "pefile_view": {
+      "warnings": [],
+      "string_tables": [
+        {
+          "lang_key": "040904b0",
+          "entries": {
+            "CompanyName": "Acme Corp, Redmond WA",
+            "FileDescription": "Acme Updater",
+            "OriginalFilename": "acme_update.exe",
+            "FileVersion": "1.0.0.0"
+          }
+        },
+        {
+          "lang_key": "080404b0",
+          "entries": {
+            "CompanyName": "Contoso 伪装有限公司",
+            "FileDescription": "系统优化服务",
+            "OriginalFilename": "svchost_helper.exe",
+            "FileVersion": "9.9.9.9"
+          }
+        }
+      ],
+      "translations": [
+        {
+          "key": "Translation",
+          "value": "0x0411 0x04b0"
+        }
+      ],
+      "parsed_blobs": 1,
+      "rt_version_name_nodes_on_disk": [
+        {
+          "name_id": 1,
+          "language_ids": [
+            1033
+          ]
+        }
+      ]
+    },
+    "evidence_view": {
+      "version_blobs": [
+        {
+          "blob_file_offset": 1112,
+          "blob_size": 760,
+          "string_tables": [
+            {
+              "index": 0,
+              "lang_key": "040904b0",
+              "header_file_offset": 1240,
+              "declared_length": 288,
+              "entries": [
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1270,
+                  "header_file_offset": 1264,
+                  "declared_wlength": 76,
+                  "declared_wvaluelength": 21,
+                  "value_file_offset": 1296,
+                  "value_per_declared_length": "Acme Corp, Redmond WA",
+                  "value_full_nul_terminated": "Acme Corp, Redmond WA",
+                  "available_words_in_block": 22,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileDescription",
+                  "key_file_offset": 1346,
+                  "header_file_offset": 1340,
+                  "declared_wlength": 68,
+                  "declared_wvaluelength": 12,
+                  "value_file_offset": 1380,
+                  "value_per_declared_length": "Acme Updater",
+                  "value_full_nul_terminated": "Acme Updater",
+                  "available_words_in_block": 14,
+                  "status": "ok"
+                },
+                {
+                  "key": "OriginalFilename",
+                  "key_file_offset": 1414,
+                  "header_file_offset": 1408,
+                  "declared_wlength": 72,
+                  "declared_wvaluelength": 15,
+                  "value_file_offset": 1448,
+                  "value_per_declared_length": "acme_update.exe",
+                  "value_full_nul_terminated": "acme_update.exe",
+                  "available_words_in_block": 16,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileVersion",
+                  "key_file_offset": 1486,
+                  "header_file_offset": 1480,
+                  "declared_wlength": 48,
+                  "declared_wvaluelength": 7,
+                  "value_file_offset": 1512,
+                  "value_per_declared_length": "1.0.0.0",
+                  "value_full_nul_terminated": "1.0.0.0",
+                  "available_words_in_block": 8,
+                  "status": "ok"
+                }
+              ]
+            },
+            {
+              "index": 1,
+              "lang_key": "080404b0",
+              "header_file_offset": 1528,
+              "declared_length": 272,
+              "entries": [
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1558,
+                  "header_file_offset": 1552,
+                  "declared_wlength": 64,
+                  "declared_wvaluelength": 14,
+                  "value_file_offset": 1584,
+                  "value_per_declared_length": "Contoso 伪装有限公司",
+                  "value_full_nul_terminated": "Contoso 伪装有限公司",
+                  "available_words_in_block": 16,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileDescription",
+                  "key_file_offset": 1622,
+                  "header_file_offset": 1616,
+                  "declared_wlength": 56,
+                  "declared_wvaluelength": 6,
+                  "value_file_offset": 1656,
+                  "value_per_declared_length": "系统优化服务",
+                  "value_full_nul_terminated": "系统优化服务",
+                  "available_words_in_block": 8,
+                  "status": "ok"
+                },
+                {
+                  "key": "OriginalFilename",
+                  "key_file_offset": 1678,
+                  "header_file_offset": 1672,
+                  "declared_wlength": 80,
+                  "declared_wvaluelength": 18,
+                  "value_file_offset": 1712,
+                  "value_per_declared_length": "svchost_helper.exe",
+                  "value_full_nul_terminated": "svchost_helper.exe",
+                  "available_words_in_block": 20,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileVersion",
+                  "key_file_offset": 1758,
+                  "header_file_offset": 1752,
+                  "declared_wlength": 48,
+                  "declared_wvaluelength": 7,
+                  "value_file_offset": 1784,
+                  "value_per_declared_length": "9.9.9.9",
+                  "value_full_nul_terminated": "9.9.9.9",
+                  "available_words_in_block": 8,
+                  "status": "ok"
+                }
+              ]
+            }
+          ],
+          "translations": [
+            {
+              "key": "Translation",
+              "header_file_offset": 1832,
+              "payload_file_offset": 1864,
+              "declared_wvaluelength": 8,
+              "pairs": [
+                {
+                  "lang_id": 1033,
+                  "charset_id": 1200,
+                  "file_offset": 1864
+                },
+                {
+                  "lang_id": 1041,
+                  "charset_id": 1200,
+                  "file_offset": 1868
+                }
+              ]
+            }
+          ],
+          "issues": [],
+          "fixed_file_offset": 1152,
+          "fixed_signature": 4277077181,
+          "resource_rva": 1112
+        }
+      ],
+      "issues": []
+    },
+    "discrepancies": [
+      {
+        "type": "phantom_translation",
+        "advertised_lang_key": "041104b0",
+        "file_offset": 1868,
+        "real_string_table_keys": [
+          "040904b0",
+          "080404b0"
+        ],
+        "explanation": "Translation advertises a language that has no StringTable; tools that enumerate Translation overstate the languages actually present."
+      },
+      {
+        "type": "conflicting_values_across_languages",
+        "key": "CompanyName",
+        "occurrences": [
+          {
+            "lang_key": "040904b0",
+            "value": "Acme Corp, Redmond WA",
+            "file_offset": 1296
+          },
+          {
+            "lang_key": "080404b0",
+            "value": "Contoso 伪装有限公司",
+            "file_offset": 1584
+          }
+        ],
+        "explanation": "No single CompanyName/OriginalFilename can be treated as authoritative; pefile exposes all tables but many consumers read only the first."
+      },
+      {
+        "type": "conflicting_values_across_languages",
+        "key": "OriginalFilename",
+        "occurrences": [
+          {
+            "lang_key": "040904b0",
+            "value": "acme_update.exe",
+            "file_offset": 1448
+          },
+          {
+            "lang_key": "080404b0",
+            "value": "svchost_helper.exe",
+            "file_offset": 1712
+          }
+        ],
+        "explanation": "No single CompanyName/OriginalFilename can be treated as authoritative; pefile exposes all tables but many consumers read only the first."
+      }
+    ]
+  },
+  {
+    "sample": "s2_duplicate_key.exe",
+    "identity_warning": "CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.",
+    "pefile_view": {
+      "warnings": [],
+      "string_tables": [
+        {
+          "lang_key": "040904b0",
+          "entries": {
+            "CompanyName": "EVIL OPERATOR SECOND COPY",
+            "OriginalFilename": "malware_payload.bin",
+            "FileVersion": "1.0.0.0"
+          }
+        }
+      ],
+      "translations": [
+        {
+          "key": "Translation",
+          "value": "0x0409 0x04b0"
+        }
+      ],
+      "parsed_blobs": 1,
+      "rt_version_name_nodes_on_disk": [
+        {
+          "name_id": 1,
+          "language_ids": [
+            1033
+          ]
+        }
+      ]
+    },
+    "evidence_view": {
+      "version_blobs": [
+        {
+          "blob_file_offset": 1112,
+          "blob_size": 604,
+          "string_tables": [
+            {
+              "index": 0,
+              "lang_key": "040904b0",
+              "header_file_offset": 1240,
+              "declared_length": 408,
+              "entries": [
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1270,
+                  "header_file_offset": 1264,
+                  "declared_wlength": 100,
+                  "declared_wvaluelength": 33,
+                  "value_file_offset": 1296,
+                  "value_per_declared_length": "Acme Corp (first, benign-looking)",
+                  "value_full_nul_terminated": "Acme Corp (first, benign-looking)",
+                  "available_words_in_block": 34,
+                  "status": "ok"
+                },
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1370,
+                  "header_file_offset": 1364,
+                  "declared_wlength": 84,
+                  "declared_wvaluelength": 25,
+                  "value_file_offset": 1396,
+                  "value_per_declared_length": "EVIL OPERATOR SECOND COPY",
+                  "value_full_nul_terminated": "EVIL OPERATOR SECOND COPY",
+                  "available_words_in_block": 26,
+                  "status": "ok"
+                },
+                {
+                  "key": "OriginalFilename",
+                  "key_file_offset": 1454,
+                  "header_file_offset": 1448,
+                  "declared_wlength": 72,
+                  "declared_wvaluelength": 15,
+                  "value_file_offset": 1488,
+                  "value_per_declared_length": "acme_update.exe",
+                  "value_full_nul_terminated": "acme_update.exe",
+                  "available_words_in_block": 16,
+                  "status": "ok"
+                },
+                {
+                  "key": "OriginalFilename",
+                  "key_file_offset": 1526,
+                  "header_file_offset": 1520,
+                  "declared_wlength": 80,
+                  "declared_wvaluelength": 19,
+                  "value_file_offset": 1560,
+                  "value_per_declared_length": "malware_payload.bin",
+                  "value_full_nul_terminated": "malware_payload.bin",
+                  "available_words_in_block": 20,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileVersion",
+                  "key_file_offset": 1606,
+                  "header_file_offset": 1600,
+                  "declared_wlength": 48,
+                  "declared_wvaluelength": 7,
+                  "value_file_offset": 1632,
+                  "value_per_declared_length": "1.0.0.0",
+                  "value_full_nul_terminated": "1.0.0.0",
+                  "available_words_in_block": 8,
+                  "status": "ok"
+                }
+              ]
+            }
+          ],
+          "translations": [
+            {
+              "key": "Translation",
+              "header_file_offset": 1680,
+              "payload_file_offset": 1712,
+              "declared_wvaluelength": 4,
+              "pairs": [
+                {
+                  "lang_id": 1033,
+                  "charset_id": 1200,
+                  "file_offset": 1712
+                }
+              ]
+            }
+          ],
+          "issues": [],
+          "fixed_file_offset": 1152,
+          "fixed_signature": 4277077181,
+          "resource_rva": 1112
+        }
+      ],
+      "issues": []
+    },
+    "discrepancies": [
+      {
+        "type": "duplicate_key_overwritten",
+        "lang_key": "040904b0",
+        "key": "CompanyName",
+        "copies_on_disk": [
+          {
+            "file_offset": 1264,
+            "value": "Acme Corp (first, benign-looking)"
+          },
+          {
+            "file_offset": 1364,
+            "value": "EVIL OPERATOR SECOND COPY"
+          }
+        ],
+        "pefile_value": "EVIL OPERATOR SECOND COPY",
+        "explanation": "pefile assigns entries[key]=value in sequence, so earlier copies are overwritten and not exposed anywhere."
+      },
+      {
+        "type": "duplicate_key_overwritten",
+        "lang_key": "040904b0",
+        "key": "OriginalFilename",
+        "copies_on_disk": [
+          {
+            "file_offset": 1448,
+            "value": "acme_update.exe"
+          },
+          {
+            "file_offset": 1520,
+            "value": "malware_payload.bin"
+          }
+        ],
+        "pefile_value": "malware_payload.bin",
+        "explanation": "pefile assigns entries[key]=value in sequence, so earlier copies are overwritten and not exposed anywhere."
+      }
+    ]
+  },
+  {
+    "sample": "s3_corrupt_length.exe",
+    "identity_warning": "CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.",
+    "pefile_view": {
+      "warnings": [],
+      "string_tables": [
+        {
+          "lang_key": "040904b0",
+          "entries": {
+            "CompanyName": "Acme Corp",
+            "OriginalFilename": "acme_update.exe",
+            "FileDescription": "Visible before corruption",
+            "InternalName": "DROPPED_BECAUSE_LENGTH_ZERO"
+          }
+        }
+      ],
+      "translations": [
+        {
+          "key": "Translation",
+          "value": "0x0409 0x04b0"
+        }
+      ],
+      "parsed_blobs": 1,
+      "rt_version_name_nodes_on_disk": [
+        {
+          "name_id": 1,
+          "language_ids": [
+            1033
+          ]
+        },
+        {
+          "name_id": 2,
+          "language_ids": [
+            2052
+          ]
+        }
+      ]
+    },
+    "evidence_view": {
+      "version_blobs": [
+        {
+          "blob_file_offset": 1160,
+          "blob_size": 656,
+          "string_tables": [
+            {
+              "index": 0,
+              "lang_key": "040904b0",
+              "header_file_offset": 1288,
+              "declared_length": 460,
+              "entries": [
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1318,
+                  "header_file_offset": 1312,
+                  "declared_wlength": 52,
+                  "declared_wvaluelength": 9,
+                  "value_file_offset": 1344,
+                  "value_per_declared_length": "Acme Corp",
+                  "value_full_nul_terminated": "Acme Corp",
+                  "available_words_in_block": 10,
+                  "status": "ok"
+                },
+                {
+                  "key": "OriginalFilename",
+                  "key_file_offset": 1370,
+                  "header_file_offset": 1364,
+                  "declared_wlength": 72,
+                  "declared_wvaluelength": 15,
+                  "value_file_offset": 1404,
+                  "value_per_declared_length": "acme_update.exe",
+                  "value_full_nul_terminated": "acme_update.exe",
+                  "available_words_in_block": 16,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileDescription",
+                  "key_file_offset": 1442,
+                  "header_file_offset": 1436,
+                  "declared_wlength": 92,
+                  "declared_wvaluelength": 25,
+                  "value_file_offset": 1476,
+                  "value_per_declared_length": "Visible before corruption",
+                  "value_full_nul_terminated": "Visible before corruption",
+                  "available_words_in_block": 26,
+                  "status": "ok"
+                },
+                {
+                  "key": "InternalName",
+                  "key_file_offset": 1534,
+                  "declared_wlength": 0,
+                  "declared_wvaluelength": 27,
+                  "value": null,
+                  "status": "wlength_zero_block_and_tail_dropped",
+                  "header_file_offset": 1528
+                }
+              ]
+            }
+          ],
+          "translations": [
+            {
+              "key": "Translation",
+              "header_file_offset": 1780,
+              "payload_file_offset": 1812,
+              "declared_wvaluelength": 4,
+              "pairs": [
+                {
+                  "lang_id": 1033,
+                  "charset_id": 1200,
+                  "file_offset": 1812
+                }
+              ]
+            }
+          ],
+          "issues": [
+            {
+              "code": "string_wlength_zero",
+              "file_offset": 1528,
+              "message": "'InternalName' wLength=0; pefile decodes this value then jumps to table end, skipping 220 bytes of subsequent blocks"
+            }
+          ],
+          "fixed_file_offset": 1200,
+          "fixed_signature": 4277077181,
+          "resource_rva": 1160
+        },
+        {
+          "blob_file_offset": 1816,
+          "blob_size": 388,
+          "string_tables": [
+            {
+              "index": 0,
+              "lang_key": "080404b0",
+              "header_file_offset": 1944,
+              "declared_length": 192,
+              "entries": [
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1974,
+                  "header_file_offset": 1968,
+                  "declared_wlength": 64,
+                  "declared_wvaluelength": 14,
+                  "value_file_offset": 2000,
+                  "value_per_declared_length": "中文公司名完整值ABCDEF",
+                  "value_full_nul_terminated": "中文公司名完整值ABCDEF",
+                  "available_words_in_block": 16,
+                  "status": "ok"
+                },
+                {
+                  "key": "FileDescription",
+                  "key_file_offset": 2038,
+                  "header_file_offset": 2032,
+                  "declared_wlength": 104,
+                  "declared_wvaluelength": 4,
+                  "value_file_offset": 2072,
+                  "value_per_declared_length": "1234",
+                  "value_full_nul_terminated": "1234567890-truncated-on-purpose",
+                  "available_words_in_block": 32,
+                  "status": "wvaluelength_undersized"
+                }
+              ]
+            }
+          ],
+          "translations": [
+            {
+              "key": "Translation",
+              "header_file_offset": 2168,
+              "payload_file_offset": 2200,
+              "declared_wvaluelength": 4,
+              "pairs": [
+                {
+                  "lang_id": 2052,
+                  "charset_id": 1200,
+                  "file_offset": 2200
+                }
+              ]
+            }
+          ],
+          "issues": [
+            {
+              "code": "wvaluelength_undersized",
+              "file_offset": 2034,
+              "message": "'FileDescription' declares 4 words; 31 characters are actually stored"
+            }
+          ],
+          "fixed_file_offset": 1856,
+          "fixed_signature": 4277077181,
+          "resource_rva": 1816
+        }
+      ],
+      "issues": [
+        {
+          "code": "string_wlength_zero",
+          "file_offset": 1528,
+          "message": "'InternalName' wLength=0; pefile decodes this value then jumps to table end, skipping 220 bytes of subsequent blocks"
+        },
+        {
+          "code": "wvaluelength_undersized",
+          "file_offset": 2034,
+          "message": "'FileDescription' declares 4 words; 31 characters are actually stored"
+        }
+      ]
+    },
+    "discrepancies": [
+      {
+        "type": "wlength_zero_drops_tail",
+        "lang_key": "040904b0",
+        "key": "InternalName",
+        "file_offset": 1528,
+        "explanation": "wLength=0 makes pefile jump to the end of this StringTable after decoding this block's own value; every block following it vanishes with no parsing warning."
+      },
+      {
+        "type": "wvaluelength_truncated",
+        "lang_key": "080404b0",
+        "key": "FileDescription",
+        "file_offset": 2032,
+        "declared_words": 4,
+        "pefile_value": "1234",
+        "full_value_on_disk": "1234567890-truncated-on-purpose",
+        "explanation": "pefile honours the corrupt wValueLength and reads only that many words; the remaining bytes stay on disk but are not decoded."
+      },
+      {
+        "type": "conflicting_values_across_languages",
+        "key": "CompanyName",
+        "occurrences": [
+          {
+            "lang_key": "040904b0",
+            "value": "Acme Corp",
+            "file_offset": 1344
+          },
+          {
+            "lang_key": "080404b0",
+            "value": "中文公司名完整值ABCDEF",
+            "file_offset": 2000
+          }
+        ],
+        "explanation": "No single CompanyName/OriginalFilename can be treated as authoritative; pefile exposes all tables but many consumers read only the first."
+      },
+      {
+        "type": "rt_version_name_node_skipped",
+        "name_nodes_on_disk": [
+          {
+            "name_id": 1,
+            "language_ids": [
+              1033
+            ]
+          },
+          {
+            "name_id": 2,
+            "language_ids": [
+              2052
+            ]
+          }
+        ],
+        "pefile_parsed_blobs": 1,
+        "hidden_blob_offsets": [
+          1816
+        ],
+        "explanation": "pefile's resource walk hardcodes the first name entry; additional RT_VERSION blobs never reach parse_version_information."
+      }
+    ]
+  },
+  {
+    "sample": "s4_hidden_name_node.exe",
+    "identity_warning": "CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.",
+    "pefile_view": {
+      "warnings": [],
+      "string_tables": [
+        {
+          "lang_key": "040904b0",
+          "entries": {
+            "CompanyName": "FIRST NODE VISIBLE"
+          }
+        }
+      ],
+      "translations": [
+        {
+          "key": "Translation",
+          "value": "0x0409 0x04b0"
+        }
+      ],
+      "parsed_blobs": 1,
+      "rt_version_name_nodes_on_disk": [
+        {
+          "name_id": 1,
+          "language_ids": [
+            1033
+          ]
+        },
+        {
+          "name_id": 2,
+          "language_ids": [
+            2052
+          ]
+        }
+      ]
+    },
+    "evidence_view": {
+      "version_blobs": [
+        {
+          "blob_file_offset": 1160,
+          "blob_size": 292,
+          "string_tables": [
+            {
+              "index": 0,
+              "lang_key": "040904b0",
+              "header_file_offset": 1288,
+              "declared_length": 96,
+              "entries": [
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1318,
+                  "header_file_offset": 1312,
+                  "declared_wlength": 72,
+                  "declared_wvaluelength": 18,
+                  "value_file_offset": 1344,
+                  "value_per_declared_length": "FIRST NODE VISIBLE",
+                  "value_full_nul_terminated": "FIRST NODE VISIBLE",
+                  "available_words_in_block": 20,
+                  "status": "ok"
+                }
+              ]
+            }
+          ],
+          "translations": [
+            {
+              "key": "Translation",
+              "header_file_offset": 1416,
+              "payload_file_offset": 1448,
+              "declared_wvaluelength": 4,
+              "pairs": [
+                {
+                  "lang_id": 1033,
+                  "charset_id": 1200,
+                  "file_offset": 1448
+                }
+              ]
+            }
+          ],
+          "issues": [],
+          "fixed_file_offset": 1200,
+          "fixed_signature": 4277077181,
+          "resource_rva": 1160
+        },
+        {
+          "blob_file_offset": 1452,
+          "blob_size": 388,
+          "string_tables": [
+            {
+              "index": 0,
+              "lang_key": "080404b0",
+              "header_file_offset": 1580,
+              "declared_length": 192,
+              "entries": [
+                {
+                  "key": "CompanyName",
+                  "key_file_offset": 1610,
+                  "header_file_offset": 1604,
+                  "declared_wlength": 92,
+                  "declared_wvaluelength": 28,
+                  "value_file_offset": 1636,
+                  "value_per_declared_length": "SECOND NODE HIDDEN BY PARSER",
+                  "value_full_nul_terminated": "SECOND NODE HIDDEN BY PARSER",
+                  "available_words_in_block": 30,
+                  "status": "ok"
+                },
+                {
+                  "key": "OriginalFilename",
+                  "key_file_offset": 1702,
+                  "header_file_offset": 1696,
+                  "declared_wlength": 76,
+                  "declared_wvaluelength": 17,
+                  "value_file_offset": 1736,
+                  "value_per_declared_length": "hidden_second.exe",
+                  "value_full_nul_terminated": "hidden_second.exe",
+                  "available_words_in_block": 18,
+                  "status": "ok"
+                }
+              ]
+            }
+          ],
+          "translations": [
+            {
+              "key": "Translation",
+              "header_file_offset": 1804,
+              "payload_file_offset": 1836,
+              "declared_wvaluelength": 4,
+              "pairs": [
+                {
+                  "lang_id": 2052,
+                  "charset_id": 1200,
+                  "file_offset": 1836
+                }
+              ]
+            }
+          ],
+          "issues": [],
+          "fixed_file_offset": 1492,
+          "fixed_signature": 4277077181,
+          "resource_rva": 1452
+        }
+      ],
+      "issues": []
+    },
+    "discrepancies": [
+      {
+        "type": "conflicting_values_across_languages",
+        "key": "CompanyName",
+        "occurrences": [
+          {
+            "lang_key": "040904b0",
+            "value": "FIRST NODE VISIBLE",
+            "file_offset": 1344
+          },
+          {
+            "lang_key": "080404b0",
+            "value": "SECOND NODE HIDDEN BY PARSER",
+            "file_offset": 1636
+          }
+        ],
+        "explanation": "No single CompanyName/OriginalFilename can be treated as authoritative; pefile exposes all tables but many consumers read only the first."
+      },
+      {
+        "type": "rt_version_name_node_skipped",
+        "name_nodes_on_disk": [
+          {
+            "name_id": 1,
+            "language_ids": [
+              1033
+            ]
+          },
+          {
+            "name_id": 2,
+            "language_ids": [
+              2052
+            ]
+          }
+        ],
+        "pefile_parsed_blobs": 1,
+        "hidden_blob_offsets": [
+          1452
+        ],
+        "explanation": "pefile's resource walk hardcodes the first name entry; additional RT_VERSION blobs never reach parse_version_information."
+      }
+    ]
+  }
+]

@@ -1,0 +1,135 @@
+{
+  "file": "s4_hidden_name_node.exe",
+  "description": "Two RT_VERSION name nodes; parser only reads the first",
+  "rsrc": {
+    "rsrc_rva": 1024,
+    "rsrc_rawptr": 1024,
+    "rsrc_virtual_size": 816,
+    "rsrc_raw_size": 1024
+  },
+  "blobs": [
+    {
+      "name_id": 1,
+      "language_id": 1033,
+      "blob_rva": 1160,
+      "blob_section_offset": 136,
+      "blob_size": 292,
+      "blob_file_offset": 1160,
+      "field_offsets": {
+        "VS_VERSIONINFO": {
+          "block": 1160,
+          "wLength": 1160,
+          "wValueLength": 1162,
+          "wType": 1164,
+          "fixed": 1200
+        },
+        "StringFileInfo[0]": {
+          "block": 1252,
+          "wLength": 1252,
+          "wValueLength": 1254,
+          "wType": 1256
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)": {
+          "block": 1288,
+          "wLength": 1288,
+          "wValueLength": 1290,
+          "wType": 1292,
+          "lang_key": 1294
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[0]:CompanyName": {
+          "block": 1312,
+          "wLength": 1312,
+          "wValueLength": 1314,
+          "wType": 1316,
+          "value": 1344,
+          "value_bytes": 38
+        },
+        "VarFileInfo[0]": {
+          "block": 1384,
+          "wLength": 1384,
+          "wValueLength": 1386,
+          "wType": 1388
+        },
+        "VarFileInfo[0]/Var[0]:Translation": {
+          "block": 1416,
+          "wLength": 1416,
+          "wValueLength": 1418,
+          "wType": 1420,
+          "payload": 1448,
+          "pairs": [
+            [
+              1033,
+              1200
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name_id": 2,
+      "language_id": 2052,
+      "blob_rva": 1452,
+      "blob_section_offset": 428,
+      "blob_size": 388,
+      "blob_file_offset": 1452,
+      "field_offsets": {
+        "VS_VERSIONINFO": {
+          "block": 1452,
+          "wLength": 1452,
+          "wValueLength": 1454,
+          "wType": 1456,
+          "fixed": 1492
+        },
+        "StringFileInfo[0]": {
+          "block": 1544,
+          "wLength": 1544,
+          "wValueLength": 1546,
+          "wType": 1548
+        },
+        "StringFileInfo[0]/StringTable[0](080404b0)": {
+          "block": 1580,
+          "wLength": 1580,
+          "wValueLength": 1582,
+          "wType": 1584,
+          "lang_key": 1586
+        },
+        "StringFileInfo[0]/StringTable[0](080404b0)/String[0]:CompanyName": {
+          "block": 1604,
+          "wLength": 1604,
+          "wValueLength": 1606,
+          "wType": 1608,
+          "value": 1636,
+          "value_bytes": 58
+        },
+        "StringFileInfo[0]/StringTable[0](080404b0)/String[1]:OriginalFilename": {
+          "block": 1696,
+          "wLength": 1696,
+          "wValueLength": 1698,
+          "wType": 1700,
+          "value": 1736,
+          "value_bytes": 36
+        },
+        "VarFileInfo[0]": {
+          "block": 1772,
+          "wLength": 1772,
+          "wValueLength": 1774,
+          "wType": 1776
+        },
+        "VarFileInfo[0]/Var[0]:Translation": {
+          "block": 1804,
+          "wLength": 1804,
+          "wValueLength": 1806,
+          "wType": 1808,
+          "payload": 1836,
+          "pairs": [
+            [
+              2052,
+              1200
+            ]
+          ]
+        }
+      },
+      "anomaly": "second RT_VERSION name node never reaches parse_version_information because the resource walk hardcodes the first name entry"
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "file": "s0_baseline.exe",
+  "description": "Clean single-language control sample",
+  "rsrc": {
+    "rsrc_rva": 1024,
+    "rsrc_rawptr": 1024,
+    "rsrc_virtual_size": 560,
+    "rsrc_raw_size": 1024
+  },
+  "blobs": [
+    {
+      "name_id": 1,
+      "language_id": 1033,
+      "blob_rva": 1112,
+      "blob_section_offset": 88,
+      "blob_size": 472,
+      "blob_file_offset": 1112,
+      "field_offsets": {
+        "VS_VERSIONINFO": {
+          "block": 1112,
+          "wLength": 1112,
+          "wValueLength": 1114,
+          "wType": 1116,
+          "fixed": 1152
+        },
+        "StringFileInfo[0]": {
+          "block": 1204,
+          "wLength": 1204,
+          "wValueLength": 1206,
+          "wType": 1208
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)": {
+          "block": 1240,
+          "wLength": 1240,
+          "wValueLength": 1242,
+          "wType": 1244,
+          "lang_key": 1246
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[0]:CompanyName": {
+          "block": 1264,
+          "wLength": 1264,
+          "wValueLength": 1266,
+          "wType": 1268,
+          "value": 1296,
+          "value_bytes": 20
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[1]:FileDescription": {
+          "block": 1316,
+          "wLength": 1316,
+          "wValueLength": 1318,
+          "wType": 1320,
+          "value": 1356,
+          "value_bytes": 38
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[2]:OriginalFilename": {
+          "block": 1396,
+          "wLength": 1396,
+          "wValueLength": 1398,
+          "wType": 1400,
+          "value": 1436,
+          "value_bytes": 32
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[3]:FileVersion": {
+          "block": 1468,
+          "wLength": 1468,
+          "wValueLength": 1470,
+          "wType": 1472,
+          "value": 1500,
+          "value_bytes": 16
+        },
+        "VarFileInfo[0]": {
+          "block": 1516,
+          "wLength": 1516,
+          "wValueLength": 1518,
+          "wType": 1520
+        },
+        "VarFileInfo[0]/Var[0]:Translation": {
+          "block": 1548,
+          "wLength": 1548,
+          "wValueLength": 1550,
+          "wType": 1552,
+          "payload": 1580,
+          "pairs": [
+            [
+              1033,
+              1200
+            ]
+          ]
+        }
+      }
+    }
+  ]
+}

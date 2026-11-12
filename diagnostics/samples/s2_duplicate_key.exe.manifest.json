@@ -1,0 +1,102 @@
+{
+  "file": "s2_duplicate_key.exe",
+  "description": "Duplicate version keys within a single StringTable",
+  "rsrc": {
+    "rsrc_rva": 1024,
+    "rsrc_rawptr": 1024,
+    "rsrc_virtual_size": 692,
+    "rsrc_raw_size": 1024
+  },
+  "blobs": [
+    {
+      "name_id": 1,
+      "language_id": 1033,
+      "blob_rva": 1112,
+      "blob_section_offset": 88,
+      "blob_size": 604,
+      "blob_file_offset": 1112,
+      "field_offsets": {
+        "VS_VERSIONINFO": {
+          "block": 1112,
+          "wLength": 1112,
+          "wValueLength": 1114,
+          "wType": 1116,
+          "fixed": 1152
+        },
+        "StringFileInfo[0]": {
+          "block": 1204,
+          "wLength": 1204,
+          "wValueLength": 1206,
+          "wType": 1208
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)": {
+          "block": 1240,
+          "wLength": 1240,
+          "wValueLength": 1242,
+          "wType": 1244,
+          "lang_key": 1246
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[0]:CompanyName": {
+          "block": 1264,
+          "wLength": 1264,
+          "wValueLength": 1266,
+          "wType": 1268,
+          "value": 1296,
+          "value_bytes": 68
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[1]:CompanyName": {
+          "block": 1364,
+          "wLength": 1364,
+          "wValueLength": 1366,
+          "wType": 1368,
+          "value": 1396,
+          "value_bytes": 52
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[2]:OriginalFilename": {
+          "block": 1448,
+          "wLength": 1448,
+          "wValueLength": 1450,
+          "wType": 1452,
+          "value": 1488,
+          "value_bytes": 32
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[3]:OriginalFilename": {
+          "block": 1520,
+          "wLength": 1520,
+          "wValueLength": 1522,
+          "wType": 1524,
+          "value": 1560,
+          "value_bytes": 40
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[4]:FileVersion": {
+          "block": 1600,
+          "wLength": 1600,
+          "wValueLength": 1602,
+          "wType": 1604,
+          "value": 1632,
+          "value_bytes": 16
+        },
+        "VarFileInfo[0]": {
+          "block": 1648,
+          "wLength": 1648,
+          "wValueLength": 1650,
+          "wType": 1652
+        },
+        "VarFileInfo[0]/Var[0]:Translation": {
+          "block": 1680,
+          "wLength": 1680,
+          "wValueLength": 1682,
+          "wType": 1684,
+          "payload": 1712,
+          "pairs": [
+            [
+              1033,
+              1200
+            ]
+          ]
+        }
+      },
+      "anomaly": "duplicate CompanyName / OriginalFilename String blocks; pefile dict assignment keeps only the last value for each key"
+    }
+  ]
+}

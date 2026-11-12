@@ -1,0 +1,174 @@
+==============================================================================
+SAMPLE: s0_baseline.exe
+NOTE:   CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.
+------------------------------------------------------------------------------
+[pefile presentation]
+  RT_VERSION name nodes on disk: [1]
+  blobs actually parsed by pefile: 1
+  pefile warnings (resource related): none
+  StringTable 040904b0 (en-US (0x0409) charset 04b0):
+      CompanyName = 'Acme Corp'
+      FileDescription = 'Legitimate updater'
+      OriginalFilename = 'acme_update.exe'
+      FileVersion = '1.0.0.0'
+  Translation (pefile, last-pair bug): 0x0409 0x04b0
+------------------------------------------------------------------------------
+[lossless evidence view]
+  blob[0] file_offset=0x458 rva=0x458 size=472
+    StringTable 040904b0 (en-US (0x0409) charset 04b0) header@0x4d8
+      @0x4f0 CompanyName [wLen=52, wValLen=9] = 'Acme Corp'
+      @0x524 FileDescription [wLen=80, wValLen=18] = 'Legitimate updater'
+      @0x574 OriginalFilename [wLen=72, wValLen=15] = 'acme_update.exe'
+      @0x5bc FileVersion [wLen=48, wValLen=7] = '1.0.0.0'
+    Translation pairs (all recovered): 0x0409/0x04b0@0x62c
+------------------------------------------------------------------------------
+[discrepancies: retained / overwritten / dropped / hidden]
+  none (clean control sample)
+
+==============================================================================
+SAMPLE: s1_lang_conflict.exe
+NOTE:   CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.
+------------------------------------------------------------------------------
+[pefile presentation]
+  RT_VERSION name nodes on disk: [1]
+  blobs actually parsed by pefile: 1
+  pefile warnings (resource related): none
+  StringTable 040904b0 (en-US (0x0409) charset 04b0):
+      CompanyName = 'Acme Corp, Redmond WA'
+      FileDescription = 'Acme Updater'
+      OriginalFilename = 'acme_update.exe'
+      FileVersion = '1.0.0.0'
+  StringTable 080404b0 (zh-CN (0x0804) charset 04b0):
+      CompanyName = 'Contoso 伪装有限公司'
+      FileDescription = '系统优化服务'
+      OriginalFilename = 'svchost_helper.exe'
+      FileVersion = '9.9.9.9'
+  Translation (pefile, last-pair bug): 0x0411 0x04b0
+------------------------------------------------------------------------------
+[lossless evidence view]
+  blob[0] file_offset=0x458 rva=0x458 size=760
+    StringTable 040904b0 (en-US (0x0409) charset 04b0) header@0x4d8
+      @0x4f0 CompanyName [wLen=76, wValLen=21] = 'Acme Corp, Redmond WA'
+      @0x53c FileDescription [wLen=68, wValLen=12] = 'Acme Updater'
+      @0x580 OriginalFilename [wLen=72, wValLen=15] = 'acme_update.exe'
+      @0x5c8 FileVersion [wLen=48, wValLen=7] = '1.0.0.0'
+    StringTable 080404b0 (zh-CN (0x0804) charset 04b0) header@0x5f8
+      @0x610 CompanyName [wLen=64, wValLen=14] = 'Contoso 伪装有限公司'
+      @0x650 FileDescription [wLen=56, wValLen=6] = '系统优化服务'
+      @0x688 OriginalFilename [wLen=80, wValLen=18] = 'svchost_helper.exe'
+      @0x6d8 FileVersion [wLen=48, wValLen=7] = '9.9.9.9'
+    Translation pairs (all recovered): 0x0409/0x04b0@0x748, 0x0411/0x04b0@0x74c
+------------------------------------------------------------------------------
+[discrepancies: retained / overwritten / dropped / hidden]
+  * phantom_translation: Translation advertises a language that has no StringTable; tools that enumerate Translation overstate the languages actually present.
+  * conflicting_values_across_languages: No single CompanyName/OriginalFilename can be treated as authoritative; pefile exposes all tables but many consumers read only the first.
+      CompanyName @0x510 [040904b0 / en-US (0x0409) charset 04b0] = 'Acme Corp, Redmond WA'
+      CompanyName @0x630 [080404b0 / zh-CN (0x0804) charset 04b0] = 'Contoso 伪装有限公司'
+  * conflicting_values_across_languages: No single CompanyName/OriginalFilename can be treated as authoritative; pefile exposes all tables but many consumers read only the first.
+      OriginalFilename @0x5a8 [040904b0 / en-US (0x0409) charset 04b0] = 'acme_update.exe'
+      OriginalFilename @0x6b0 [080404b0 / zh-CN (0x0804) charset 04b0] = 'svchost_helper.exe'
+
+==============================================================================
+SAMPLE: s2_duplicate_key.exe
+NOTE:   CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.
+------------------------------------------------------------------------------
+[pefile presentation]
+  RT_VERSION name nodes on disk: [1]
+  blobs actually parsed by pefile: 1
+  pefile warnings (resource related): none
+  StringTable 040904b0 (en-US (0x0409) charset 04b0):
+      CompanyName = 'EVIL OPERATOR SECOND COPY'
+      OriginalFilename = 'malware_payload.bin'
+      FileVersion = '1.0.0.0'
+  Translation (pefile, last-pair bug): 0x0409 0x04b0
+------------------------------------------------------------------------------
+[lossless evidence view]
+  blob[0] file_offset=0x458 rva=0x458 size=604
+    StringTable 040904b0 (en-US (0x0409) charset 04b0) header@0x4d8
+      @0x4f0 CompanyName [wLen=100, wValLen=33] = 'Acme Corp (first, benign-looking)'
+      @0x554 CompanyName [wLen=84, wValLen=25] = 'EVIL OPERATOR SECOND COPY'
+      @0x5a8 OriginalFilename [wLen=72, wValLen=15] = 'acme_update.exe'
+      @0x5f0 OriginalFilename [wLen=80, wValLen=19] = 'malware_payload.bin'
+      @0x640 FileVersion [wLen=48, wValLen=7] = '1.0.0.0'
+    Translation pairs (all recovered): 0x0409/0x04b0@0x6b0
+------------------------------------------------------------------------------
+[discrepancies: retained / overwritten / dropped / hidden]
+  * duplicate_key_overwritten: pefile assigns entries[key]=value in sequence, so earlier copies are overwritten and not exposed anywhere.
+      on-disk @0x4f0: 'Acme Corp (first, benign-looking)'
+      on-disk @0x554: 'EVIL OPERATOR SECOND COPY'
+      pefile exposes only: 'EVIL OPERATOR SECOND COPY'
+  * duplicate_key_overwritten: pefile assigns entries[key]=value in sequence, so earlier copies are overwritten and not exposed anywhere.
+      on-disk @0x5a8: 'acme_update.exe'
+      on-disk @0x5f0: 'malware_payload.bin'
+      pefile exposes only: 'malware_payload.bin'
+
+==============================================================================
+SAMPLE: s3_corrupt_length.exe
+NOTE:   CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.
+------------------------------------------------------------------------------
+[pefile presentation]
+  RT_VERSION name nodes on disk: [1, 2]
+  blobs actually parsed by pefile: 1
+  pefile warnings (resource related): none
+  StringTable 040904b0 (en-US (0x0409) charset 04b0):
+      CompanyName = 'Acme Corp'
+      OriginalFilename = 'acme_update.exe'
+      FileDescription = 'Visible before corruption'
+      InternalName = 'DROPPED_BECAUSE_LENGTH_ZERO'
+  Translation (pefile, last-pair bug): 0x0409 0x04b0
+------------------------------------------------------------------------------
+[lossless evidence view]
+  blob[0] file_offset=0x488 rva=0x488 size=656
+    StringTable 040904b0 (en-US (0x0409) charset 04b0) header@0x508
+      @0x520 CompanyName [wLen=52, wValLen=9] = 'Acme Corp'
+      @0x554 OriginalFilename [wLen=72, wValLen=15] = 'acme_update.exe'
+      @0x59c FileDescription [wLen=92, wValLen=25] = 'Visible before corruption'
+      @0x5f8 InternalName [wLen=0, wValLen=27] = <block present on disk, not decoded by pefile> <<wlength_zero_block_and_tail_dropped>>
+    Translation pairs (all recovered): 0x0409/0x04b0@0x714
+    ISSUE [string_wlength_zero] @0x5f8: 'InternalName' wLength=0; pefile decodes this value then jumps to table end, skipping 220 bytes of subsequent blocks
+  blob[1] file_offset=0x718 rva=0x718 size=388
+    StringTable 080404b0 (zh-CN (0x0804) charset 04b0) header@0x798
+      @0x7b0 CompanyName [wLen=64, wValLen=14] = '中文公司名完整值ABCDEF'
+      @0x7f0 FileDescription [wLen=104, wValLen=4] = '1234567890-truncated-on-purpose' <<wvaluelength_undersized>>
+          pefile would decode only: '1234' (value bytes @0x818)
+    Translation pairs (all recovered): 0x0804/0x04b0@0x898
+    ISSUE [wvaluelength_undersized] @0x7f2: 'FileDescription' declares 4 words; 31 characters are actually stored
+------------------------------------------------------------------------------
+[discrepancies: retained / overwritten / dropped / hidden]
+  * wlength_zero_drops_tail: wLength=0 makes pefile jump to the end of this StringTable after decoding this block's own value; every block following it vanishes with no parsing warning.
+  * wvaluelength_truncated: pefile honours the corrupt wValueLength and reads only that many words; the remaining bytes stay on disk but are not decoded.
+  * conflicting_values_across_languages: No single CompanyName/OriginalFilename can be treated as authoritative; pefile exposes all tables but many consumers read only the first.
+      CompanyName @0x540 [040904b0 / en-US (0x0409) charset 04b0] = 'Acme Corp'
+      CompanyName @0x7d0 [080404b0 / zh-CN (0x0804) charset 04b0] = '中文公司名完整值ABCDEF'
+  * rt_version_name_node_skipped: pefile's resource walk hardcodes the first name entry; additional RT_VERSION blobs never reach parse_version_information.
+      hidden blob file offsets: ['0x718']
+
+==============================================================================
+SAMPLE: s4_hidden_name_node.exe
+NOTE:   CompanyName / OriginalFilename are unauthenticated resource strings, not signature-derived identity.
+------------------------------------------------------------------------------
+[pefile presentation]
+  RT_VERSION name nodes on disk: [1, 2]
+  blobs actually parsed by pefile: 1
+  pefile warnings (resource related): none
+  StringTable 040904b0 (en-US (0x0409) charset 04b0):
+      CompanyName = 'FIRST NODE VISIBLE'
+  Translation (pefile, last-pair bug): 0x0409 0x04b0
+------------------------------------------------------------------------------
+[lossless evidence view]
+  blob[0] file_offset=0x488 rva=0x488 size=292
+    StringTable 040904b0 (en-US (0x0409) charset 04b0) header@0x508
+      @0x520 CompanyName [wLen=72, wValLen=18] = 'FIRST NODE VISIBLE'
+    Translation pairs (all recovered): 0x0409/0x04b0@0x5a8
+  blob[1] file_offset=0x5ac rva=0x5ac size=388
+    StringTable 080404b0 (zh-CN (0x0804) charset 04b0) header@0x62c
+      @0x644 CompanyName [wLen=92, wValLen=28] = 'SECOND NODE HIDDEN BY PARSER'
+      @0x6a0 OriginalFilename [wLen=76, wValLen=17] = 'hidden_second.exe'
+    Translation pairs (all recovered): 0x0804/0x04b0@0x72c
+------------------------------------------------------------------------------
+[discrepancies: retained / overwritten / dropped / hidden]
+  * conflicting_values_across_languages: No single CompanyName/OriginalFilename can be treated as authoritative; pefile exposes all tables but many consumers read only the first.
+      CompanyName @0x540 [040904b0 / en-US (0x0409) charset 04b0] = 'FIRST NODE VISIBLE'
+      CompanyName @0x664 [080404b0 / zh-CN (0x0804) charset 04b0] = 'SECOND NODE HIDDEN BY PARSER'
+  * rt_version_name_node_skipped: pefile's resource walk hardcodes the first name entry; additional RT_VERSION blobs never reach parse_version_information.
+      hidden blob file offsets: ['0x5ac']

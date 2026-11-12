@@ -1,0 +1,176 @@
+{
+  "file": "s3_corrupt_length.exe",
+  "description": "Corrupt wLength=0 and undersized wValueLength",
+  "rsrc": {
+    "rsrc_rva": 1024,
+    "rsrc_rawptr": 1024,
+    "rsrc_virtual_size": 1180,
+    "rsrc_raw_size": 1536
+  },
+  "blobs": [
+    {
+      "name_id": 1,
+      "language_id": 1033,
+      "blob_rva": 1160,
+      "blob_section_offset": 136,
+      "blob_size": 656,
+      "blob_file_offset": 1160,
+      "field_offsets": {
+        "VS_VERSIONINFO": {
+          "block": 1160,
+          "wLength": 1160,
+          "wValueLength": 1162,
+          "wType": 1164,
+          "fixed": 1200
+        },
+        "StringFileInfo[0]": {
+          "block": 1252,
+          "wLength": 1252,
+          "wValueLength": 1254,
+          "wType": 1256
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)": {
+          "block": 1288,
+          "wLength": 1288,
+          "wValueLength": 1290,
+          "wType": 1292,
+          "lang_key": 1294
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[0]:CompanyName": {
+          "block": 1312,
+          "wLength": 1312,
+          "wValueLength": 1314,
+          "wType": 1316,
+          "value": 1344,
+          "value_bytes": 20
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[1]:OriginalFilename": {
+          "block": 1364,
+          "wLength": 1364,
+          "wValueLength": 1366,
+          "wType": 1368,
+          "value": 1404,
+          "value_bytes": 32
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[2]:FileDescription": {
+          "block": 1436,
+          "wLength": 1436,
+          "wValueLength": 1438,
+          "wType": 1440,
+          "value": 1476,
+          "value_bytes": 52
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[3]:InternalName": {
+          "block": 1528,
+          "wLength": 1528,
+          "wValueLength": 1530,
+          "wType": 1532,
+          "value": 1560,
+          "value_bytes": 56
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[4]:LegalCopyright": {
+          "block": 1616,
+          "wLength": 1616,
+          "wValueLength": 1618,
+          "wType": 1620,
+          "value": 1652,
+          "value_bytes": 30
+        },
+        "StringFileInfo[0]/StringTable[0](040904b0)/String[5]:ProductName": {
+          "block": 1684,
+          "wLength": 1684,
+          "wValueLength": 1686,
+          "wType": 1688,
+          "value": 1716,
+          "value_bytes": 30
+        },
+        "VarFileInfo[0]": {
+          "block": 1748,
+          "wLength": 1748,
+          "wValueLength": 1750,
+          "wType": 1752
+        },
+        "VarFileInfo[0]/Var[0]:Translation": {
+          "block": 1780,
+          "wLength": 1780,
+          "wValueLength": 1782,
+          "wType": 1784,
+          "payload": 1812,
+          "pairs": [
+            [
+              1033,
+              1200
+            ]
+          ]
+        }
+      },
+      "anomaly": "InternalName.wLength set to 0; pefile discards InternalName and the two blocks after it without a warning"
+    },
+    {
+      "name_id": 2,
+      "language_id": 2052,
+      "blob_rva": 1816,
+      "blob_section_offset": 792,
+      "blob_size": 388,
+      "blob_file_offset": 1816,
+      "field_offsets": {
+        "VS_VERSIONINFO": {
+          "block": 1816,
+          "wLength": 1816,
+          "wValueLength": 1818,
+          "wType": 1820,
+          "fixed": 1856
+        },
+        "StringFileInfo[0]": {
+          "block": 1908,
+          "wLength": 1908,
+          "wValueLength": 1910,
+          "wType": 1912
+        },
+        "StringFileInfo[0]/StringTable[0](080404b0)": {
+          "block": 1944,
+          "wLength": 1944,
+          "wValueLength": 1946,
+          "wType": 1948,
+          "lang_key": 1950
+        },
+        "StringFileInfo[0]/StringTable[0](080404b0)/String[0]:CompanyName": {
+          "block": 1968,
+          "wLength": 1968,
+          "wValueLength": 1970,
+          "wType": 1972,
+          "value": 2000,
+          "value_bytes": 30
+        },
+        "StringFileInfo[0]/StringTable[0](080404b0)/String[1]:FileDescription": {
+          "block": 2032,
+          "wLength": 2032,
+          "wValueLength": 2034,
+          "wType": 2036,
+          "value": 2072,
+          "value_bytes": 64
+        },
+        "VarFileInfo[0]": {
+          "block": 2136,
+          "wLength": 2136,
+          "wValueLength": 2138,
+          "wType": 2140
+        },
+        "VarFileInfo[0]/Var[0]:Translation": {
+          "block": 2168,
+          "wLength": 2168,
+          "wValueLength": 2170,
+          "wType": 2172,
+          "payload": 2200,
+          "pairs": [
+            [
+              2052,
+              1200
+            ]
+          ]
+        }
+      },
+      "anomaly": "FileDescription.wValueLength reduced to 4 words (30 stored); pefile decodes only the first 4 characters"
+    }
+  ]
+}
