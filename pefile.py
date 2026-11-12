@@ -1605,6 +1605,110 @@ class ImportData(DataContainer):
         self.__dict__[name] = val
 
 
+class ImportSummaryEntry(DataContainer):
+    """A single normalized item that participates in the imphash.
+
+    Every item here corresponds to one ``dll.function`` token in the exact
+    order and with the exact spelling used by :pefile:`PE.get_imphash`, so the
+    declared hash can be recomputed from the collected items without relying
+    on any hidden state.
+
+    dll:            Normalized DLL name (lowercase, with a trailing
+                    ``.dll``/``.sys``/``.ocx`` extension removed).
+    function:       Normalized function/ordinal name (lowercase) that was
+                    actually hashed.
+    canonical:      The fully joined token ``"dll.function"``.
+    by_ordinal:     ``True`` when the import had no in-file name and the
+                    function name was derived from the ordinal.
+    ordinal:        The raw ordinal number for ordinal imports, else ``None``.
+    ordinal_resolved:
+                    ``True`` when the ordinal was found in the frozen
+                    imphash lookup table; ``False`` when a synthetic
+                    ``ordN`` fallback name had to be generated.
+    source_dll_offset: File offset of the DLL name string.
+    thunk_offset:   File offset of the ILT thunk that describes this import.
+    name_offset:    File offset of the in-file hint/name string, or ``None``
+                    for ordinal imports.
+    index:          Zero-based position of this item in the hashed sequence.
+    """
+
+
+class UnresolvedImport(DataContainer):
+    """An import entry that could not be turned into a hashed token.
+
+    These entries are deliberately excluded from :pefile:`ImportSummaryEntry`
+    (and therefore from the hash) while still being reported with their
+    location so an auditor can see exactly what was dropped and why.
+
+    reason:         Machine-readable cause, one of ``"invalid_name"`` or
+                    ``"ordinal_lookup_failed"``. Structural problems that make
+                    an entry unreadable are reported separately as
+                    :pefile:`ImportAuditEvent` rather than unresolved items.
+    detail:         Human-readable explanation.
+    dll:            Raw (unnormalized) DLL name as found in the file, or
+                    ``None`` when the DLL name itself could not be read.
+    ordinal:        Raw ordinal number when applicable, else ``None``.
+    thunk_offset:   File offset of the offending ILT thunk, or ``None`` when
+                    the failure happened while walking descriptors.
+    name_offset:    File offset of the unreadable/invalid name, else ``None``.
+    """
+
+
+class ImportAuditEvent(DataContainer):
+    """A structural problem observed while walking the import directory.
+
+    kind:       Machine-readable event kind (for example
+                ``"descriptor_truncated"`` or ``"thunk_table_truncated"``).
+    detail:     Human-readable explanation.
+    rva:        RVA where the problem was detected, if known.
+    offset:     File offset where the problem was detected, if known.
+    """
+
+
+class ImportSummary(DataContainer):
+    """Auditable companion to the traditional import hash (imphash).
+
+    It preserves the legacy result while making the computation transparent
+    and trustworthy.
+
+    imphash:        The imphash value, identical to
+                    :pefile:`PE.get_imphash` for the same data. The empty
+                    string is used when no import directory is present.
+    entries:        Ordered list of :pefile:`ImportSummaryEntry`, one per
+                    normalized token that was hashed.
+    unresolved:     Ordered list of :pefile:`UnresolvedImport` for entries
+                    that could not be normalized and were excluded.
+    events:         Ordered list of :pefile:`ImportAuditEvent` describing
+                    structural problems encountered during the walk.
+    complete:       Trust flag. ``True`` only when the whole import
+                    directory and every thunk table were walked to their
+                    natural terminators and no entry was left unresolved.
+                    When ``False`` the imphash reflects a partial view and
+                    must not be treated as a reliable same-family signal.
+    truncated:      ``True`` when the walk ran past the end of the file or a
+                    table terminated without its expected null entry.
+    duplicate_count: Number of hashed tokens whose canonical value appeared
+                    more than once. Repeated imports are kept (the canonical
+                    algorithm never reorders or de-duplicates) but reported.
+    """
+
+    def recompute_imphash(self, usedforsecurity=True):
+        """Recompute the MD5 imphash from the declared normalized entries.
+
+        This joins :pefile:`ImportSummaryEntry.canonical` tokens in their
+        stored order, exactly as :pefile:`PE.get_imphash` does, allowing the
+        declared :pefile:`ImportSummary.imphash` to be verified independently.
+        An empty import directory yields the empty string, also matching
+        :pefile:`PE.get_imphash`.
+        """
+        if not self.entries:
+            return ""
+        return md5(
+            ",".join(entry.canonical for entry in self.entries).encode(),
+            usedforsecurity=usedforsecurity,
+        ).hexdigest()
+
+
 class ExportDirData(DataContainer):
     """Holds export directory information.
 
@@ -5820,6 +5924,45 @@ class PE:
 
         raise Exception("Invalid hashing algorithm specified")
 
+    # Extensions stripped from the DLL component of an imphash token. Kept as
+    # a class attribute so the traditional algorithm and the auditable summary
+    # share one definition and cannot drift apart.
+    _IMPHASH_DLL_EXTENSIONS = ("ocx", "sys", "dll")
+
+    @classmethod
+    def _normalize_imphash_dll(cls, dll_name):
+        """Lowercase a DLL name and strip a trailing imphash extension.
+
+        Mirrors exactly the DLL handling historically performed inline by
+        :pefile:`PE.get_imphash` so the two code paths produce identical
+        tokens.
+        """
+        if isinstance(dll_name, bytes):
+            libname = dll_name.decode().lower()
+        else:
+            libname = dll_name.lower()
+        parts = libname.rsplit(".", 1)
+        if len(parts) > 1 and parts[1] in cls._IMPHASH_DLL_EXTENSIONS:
+            libname = parts[0]
+        return libname
+
+    @staticmethod
+    def _imphash_ordinal_function(dll_name_lower, ordinal):
+        """Resolve the hashed function name for an ordinal import.
+
+        Uses the frozen imphash-specific ordinal tables. Raises
+        :pefile:`PEFormatError`, matching the traditional behaviour, if no
+        name (not even a synthetic ``ordN`` fallback) can be produced.
+        """
+        funcname = ordlookup.imphash_ordinal_lookup(
+            dll_name_lower, ordinal, make_name=True
+        )
+        if not funcname:
+            raise PEFormatError(
+                f"Unable to look up ordinal {dll_name_lower}:{ordinal:04x}"
+            )
+        return funcname
+
     def get_imphash(self, usedforsecurity=True):
         """Return the imphash of the PE file.
 
@@ -5833,19 +5976,10 @@ class PE:
         """
 
         impstrs = []
-        exts = ["ocx", "sys", "dll"]
         if not hasattr(self, "DIRECTORY_ENTRY_IMPORT"):
             return ""
         for entry in self.DIRECTORY_ENTRY_IMPORT:
-            if isinstance(entry.dll, bytes):
-                libname = entry.dll.decode().lower()
-            else:
-                libname = entry.dll.lower()
-            parts = libname.rsplit(".", 1)
-
-            if len(parts) > 1 and parts[1] in exts:
-                libname = parts[0]
-
+            libname = self._normalize_imphash_dll(entry.dll)
             entry_dll_lower = entry.dll.lower()
             for imp in entry.imports:
                 if not imp.name or getattr(imp, "name_from_ordinal", False):
@@ -5856,13 +5990,9 @@ class PE:
                     # implementation. name_from_ordinal is set when parse_import_directory
                     # resolved the name at load time using the non-imphash-specific ordinal
                     # lookup, which has different mappings than the frozen imphash table.
-                    funcname = ordlookup.imphash_ordinal_lookup(
-                        entry_dll_lower, imp.ordinal, make_name=True
+                    funcname = self._imphash_ordinal_function(
+                        entry_dll_lower, imp.ordinal
                     )
-                    if not funcname:
-                        raise PEFormatError(
-                            f"Unable to look up ordinal {entry.dll}:{imp.ordinal:04x}"
-                        )
                 else:
                     funcname = imp.name
 
@@ -5874,6 +6004,471 @@ class PE:
                 impstrs.append(f"{libname.lower()}.{funcname.lower()}")
 
         return md5(",".join(impstrs).encode(), usedforsecurity=usedforsecurity).hexdigest()
+
+    def get_import_summary(self, usedforsecurity=True):
+        """Return an auditable summary of the imports alongside the imphash.
+
+        The traditional :pefile:`PE.get_imphash` result is preserved verbatim
+        in :pefile:`ImportSummary.imphash`, while the summary additionally
+        reports every normalized item that participates in the hash (with its
+        source offsets), every entry that could not be resolved, and every
+        structural problem encountered while walking the directory.
+
+        Crucially, :pefile:`ImportSummary.complete` acts as a trust gate. It is
+        ``False`` whenever the import directory or a thunk table could not be
+        walked to its natural terminator or whenever an entry was dropped, so a
+        hash computed from a truncated fragment cannot silently be treated as a
+        trustworthy same-family signal.
+
+        The canonical ordering of the original algorithm is never altered;
+        repeated imports are retained and counted rather than de-duplicated.
+        """
+
+        summary = ImportSummary(
+            imphash="",
+            entries=[],
+            unresolved=[],
+            events=[],
+            complete=True,
+            truncated=False,
+            duplicate_count=0,
+        )
+
+        import_directory = self.OPTIONAL_HEADER.DATA_DIRECTORY[
+            DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]
+        ]
+        if not import_directory.VirtualAddress:
+            # No import directory is declared at all: a complete, empty result.
+            return summary
+
+        # Pass 1: build the hashed items from the *exact* parsed objects that
+        # get_imphash consumes, so the two can never diverge. When the parser
+        # could not even create the directory (e.g. it was truncated inside a
+        # descriptor) this contributes nothing.
+        if hasattr(self, "DIRECTORY_ENTRY_IMPORT"):
+            entries, unresolved = self._summary_entries_from_parsed_imports()
+        else:
+            entries, unresolved = [], []
+
+        # Pass 2: independently walk the raw structures to decide whether the
+        # parsed view represents the whole import directory.
+        events, truncated = self._audit_import_structure()
+
+        summary.entries = entries
+        summary.unresolved = unresolved
+        summary.events = events
+        summary.truncated = truncated
+
+        canonicals = [entry.canonical for entry in entries]
+        counts = Counter(canonicals)
+        summary.duplicate_count = sum(
+            count - 1 for count in counts.values() if count > 1
+        )
+
+        # With no surviving tokens the imphash is the empty string, matching
+        # get_imphash (which hashes nothing) rather than the MD5 of "".
+        if canonicals:
+            summary.imphash = md5(
+                ",".join(canonicals).encode(), usedforsecurity=usedforsecurity
+            ).hexdigest()
+
+        # Trustworthy only when the structural walk reached every natural
+        # terminator without running past the data and no entry was dropped.
+        summary.complete = not truncated and not unresolved and not events
+        return summary
+
+    def _summary_entries_from_parsed_imports(self):
+        """Build hashed items and unresolved records from parsed imports.
+
+        The normalization here is identical to :pefile:`PE.get_imphash`: the
+        same DLL/ordinal handling is invoked and entries are emitted in parse
+        order, guaranteeing that recomputing the hash from the returned items
+        yields the legacy imphash.
+        """
+
+        entries = []
+        unresolved = []
+        for descriptor in self.DIRECTORY_ENTRY_IMPORT:
+            libname = self._normalize_imphash_dll(descriptor.dll)
+            dll_name_lower = descriptor.dll.lower()
+            dll_offset = self._safe_offset(descriptor.struct.Name)
+            for imp in descriptor.imports:
+                # parse_imports replaces names it cannot decode (including
+                # non-UTF-8 bytes and disallowed characters) with "*invalid*"
+                # and excludes them from the hash. Surface them as unresolved
+                # so nothing is dropped silently.
+                if imp.name == b"*invalid*":
+                    unresolved.append(
+                        UnresolvedImport(
+                            reason="invalid_name",
+                            detail=(
+                                "Import name contains characters outside the "
+                                "accepted set (e.g. non-UTF-8 bytes)."
+                            ),
+                            dll=descriptor.dll,
+                            ordinal=imp.ordinal,
+                            thunk_offset=imp.thunk_offset,
+                            name_offset=imp.name_offset,
+                        )
+                    )
+                    continue
+                if not imp.name or getattr(imp, "name_from_ordinal", False):
+                    ordinal = imp.ordinal
+                    try:
+                        funcname = self._imphash_ordinal_function(
+                            dll_name_lower, ordinal
+                        )
+                    except PEFormatError as exc:
+                        unresolved.append(
+                            UnresolvedImport(
+                                reason="ordinal_lookup_failed",
+                                detail=exc.value,
+                                dll=descriptor.dll,
+                                ordinal=ordinal,
+                                thunk_offset=imp.thunk_offset,
+                                name_offset=None,
+                            )
+                        )
+                        continue
+                    function_name = (
+                        funcname.decode()
+                        if isinstance(funcname, bytes)
+                        else funcname
+                    )
+                    # The frozen table returns a synthetic "ordN" fallback for
+                    # ordinals it does not know; distinguish real resolutions.
+                    ordinal_resolved = not function_name.startswith("ord")
+                    self._append_summary_entry(
+                        entries,
+                        libname=libname,
+                        function_name=function_name,
+                        by_ordinal=True,
+                        ordinal=ordinal,
+                        ordinal_resolved=ordinal_resolved,
+                        dll_offset=dll_offset,
+                        thunk_offset=imp.thunk_offset,
+                        name_offset=None,
+                    )
+                    continue
+
+                if isinstance(imp.name, bytes):
+                    function_name = imp.name.decode()
+                else:
+                    function_name = imp.name
+                self._append_summary_entry(
+                    entries,
+                    libname=libname,
+                    function_name=function_name,
+                    by_ordinal=False,
+                    ordinal=None,
+                    ordinal_resolved=True,
+                    dll_offset=dll_offset,
+                    thunk_offset=imp.thunk_offset,
+                    name_offset=imp.name_offset,
+                )
+        return entries, unresolved
+
+    def _audit_import_structure(self):
+        """Independently verify that the import directory is fully readable.
+
+        Returns ``(events, truncated)``. The walk deliberately mirrors the
+        descriptor and thunk table selection rules of the parser but, unlike
+        the parser, treats a missing natural terminator or an unreadable
+        thunk/name as a hard structural failure instead of silently keeping
+        whatever fragment was recovered.
+        """
+
+        events = []
+        truncated = False
+
+        directory = self.OPTIONAL_HEADER.DATA_DIRECTORY[
+            DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]
+        ]
+        descriptor_rva = directory.VirtualAddress
+        descriptor_size = Structure(
+            self.__IMAGE_IMPORT_DESCRIPTOR_format__
+        ).sizeof()
+
+        if not descriptor_rva:
+            return events, truncated
+
+        if self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE_PLUS:
+            ordinal_flag = IMAGE_ORDINAL_FLAG64
+            thunk_size = Structure(
+                self.__IMAGE_THUNK_DATA64_format__
+            ).sizeof()
+            thunk_format = self.__IMAGE_THUNK_DATA64_format__
+            address_mask = 0x7FFFFFFFFFFFFFFF
+        else:
+            ordinal_flag = IMAGE_ORDINAL_FLAG
+            thunk_size = Structure(self.__IMAGE_THUNK_DATA_format__).sizeof()
+            thunk_format = self.__IMAGE_THUNK_DATA_format__
+            address_mask = 0x7FFFFFFF
+
+        for descriptor_index in range(MAX_IMPORT_SYMBOLS):
+            current_rva = descriptor_rva + descriptor_index * descriptor_size
+            try:
+                data = self.get_data(current_rva, descriptor_size)
+            except PEFormatError as exc:
+                events.append(
+                    ImportAuditEvent(
+                        kind="descriptor_truncated",
+                        detail=f"Import descriptor is unreadable: {exc.value}",
+                        rva=current_rva,
+                        offset=self._safe_offset(current_rva),
+                    )
+                )
+                return events, True
+
+            if len(data) < descriptor_size:
+                events.append(
+                    ImportAuditEvent(
+                        kind="descriptor_truncated",
+                        detail=(
+                            "Import directory ends before a full descriptor; "
+                            "the null terminator is missing."
+                        ),
+                        rva=current_rva,
+                        offset=self._safe_offset(current_rva),
+                    )
+                )
+                return events, True
+
+            descriptor = self.__unpack_data__(
+                self.__IMAGE_IMPORT_DESCRIPTOR_format__,
+                data,
+                file_offset=self._safe_offset(current_rva),
+            )
+            if not descriptor or descriptor.all_zeroes():
+                # Natural terminator reached: the directory walk is complete.
+                return events, truncated
+
+            table_rva = descriptor.OriginalFirstThunk or descriptor.FirstThunk
+            table_kind = (
+                "OriginalFirstThunk"
+                if descriptor.OriginalFirstThunk
+                else "FirstThunk"
+            )
+            table_truncated, _table_malformed = self._audit_thunk_table(
+                table_rva=table_rva,
+                table_kind=table_kind,
+                thunk_size=thunk_size,
+                thunk_format=thunk_format,
+                ordinal_flag=ordinal_flag,
+                address_mask=address_mask,
+                events=events,
+            )
+            # Malformed-but-present entries are recorded as events (and clear
+            # `complete` via the events list); only physical truncation sets the
+            # truncated flag and ends the walk.
+            if table_truncated:
+                return events, True
+
+        events.append(
+            ImportAuditEvent(
+                kind="descriptor_truncated",
+                detail=(
+                    "Import directory exceeded the descriptor limit without a "
+                    "null terminator."
+                ),
+                rva=descriptor_rva + MAX_IMPORT_SYMBOLS * descriptor_size,
+                offset=self._safe_offset(
+                    descriptor_rva + MAX_IMPORT_SYMBOLS * descriptor_size
+                ),
+            )
+        )
+        return events, True
+
+    def _audit_thunk_table(
+        self,
+        table_rva,
+        table_kind,
+        thunk_size,
+        thunk_format,
+        ordinal_flag,
+        address_mask,
+        events,
+    ):
+        """Verify one ILT/IAT reaches its null terminator and all names read.
+
+        Returns ``(truncated, malformed)`` where ``truncated`` marks physical
+        damage (data runs out or the terminator is missing) and ``malformed``
+        marks entries that are fully present but cannot be turned into a valid
+        import. Either kind clears the summary's trust flag, but only
+        ``truncated`` sets :pefile:`ImportSummary.truncated`.
+        """
+
+        malformed = False
+        for thunk_index in range(MAX_IMPORT_SYMBOLS):
+            thunk_rva = table_rva + thunk_index * thunk_size
+            try:
+                data = self.get_data(thunk_rva, thunk_size)
+            except PEFormatError as exc:
+                events.append(
+                    ImportAuditEvent(
+                        kind="thunk_table_truncated",
+                        detail=f"{table_kind} thunk is unreadable: {exc.value}",
+                        rva=thunk_rva,
+                        offset=self._safe_offset(thunk_rva),
+                    )
+                )
+                return True, malformed
+
+            if len(data) < thunk_size:
+                events.append(
+                    ImportAuditEvent(
+                        kind="thunk_table_truncated",
+                        detail=(
+                            f"{table_kind} ends before a full thunk; the null "
+                            "terminator is missing."
+                        ),
+                        rva=thunk_rva,
+                        offset=self._safe_offset(thunk_rva),
+                    )
+                )
+                return True, malformed
+
+            thunk = self.__unpack_data__(
+                thunk_format, data, file_offset=self._safe_offset(thunk_rva)
+            )
+            if not thunk or thunk.all_zeroes():
+                return False, malformed
+
+            thunk_offset = thunk.get_file_offset()
+            if thunk.AddressOfData & ordinal_flag:
+                # The parser rejects ordinals whose value exceeds 16 bits.
+                if thunk.AddressOfData & 0x7FFFFFFF > 0xFFFF:
+                    events.append(
+                        ImportAuditEvent(
+                            kind="invalid_ordinal",
+                            detail=(
+                                "Ordinal value exceeds the 16-bit range; the "
+                                "thunk is treated as corrupt."
+                            ),
+                            rva=thunk_rva,
+                            offset=thunk_offset,
+                        )
+                    )
+                    malformed = True
+                continue
+
+            hint_name_rva = thunk.AddressOfData & address_mask
+            symbol_name_rva = hint_name_rva + 2
+            name_offset = self._safe_offset(symbol_name_rva)
+
+            # Probe whether the hint/name region is present in the file at all.
+            # A short or empty read means the table points past the data, i.e.
+            # the import directory was truncated; this must not be conflated
+            # with a present-but-malformed name.
+            try:
+                name_region = self.get_data(
+                    symbol_name_rva, MAX_IMPORT_NAME_LENGTH
+                )
+            except PEFormatError as exc:
+                events.append(
+                    ImportAuditEvent(
+                        kind="name_unreadable",
+                        detail=f"Hint/name string is unreadable: {exc.value}",
+                        rva=symbol_name_rva,
+                        offset=name_offset,
+                    )
+                )
+                return True, malformed
+
+            if not name_region:
+                events.append(
+                    ImportAuditEvent(
+                        kind="name_unreadable",
+                        detail=(
+                            "Hint/name string lies beyond the available data; "
+                            "the import directory appears truncated."
+                        ),
+                        rva=symbol_name_rva,
+                        offset=name_offset,
+                    )
+                )
+                return True, malformed
+
+            try:
+                raw_name = self.get_string_at_rva(
+                    symbol_name_rva, MAX_IMPORT_NAME_LENGTH
+                )
+            except PEFormatError as exc:
+                events.append(
+                    ImportAuditEvent(
+                        kind="name_unreadable",
+                        detail=f"Hint/name string is unreadable: {exc.value}",
+                        rva=symbol_name_rva,
+                        offset=name_offset,
+                    )
+                )
+                return True, malformed
+
+            if not raw_name or not is_valid_function_name(raw_name):
+                events.append(
+                    ImportAuditEvent(
+                        kind="invalid_name",
+                        detail=(
+                            "Import name is missing or contains characters "
+                            "outside the accepted set (e.g. non-UTF-8 bytes)."
+                        ),
+                        rva=symbol_name_rva,
+                        offset=name_offset,
+                    )
+                )
+                malformed = True
+
+        events.append(
+            ImportAuditEvent(
+                kind="thunk_table_truncated",
+                detail=(
+                    f"{table_kind} exceeded the thunk limit without a null "
+                    "terminator."
+                ),
+                rva=table_rva + MAX_IMPORT_SYMBOLS * thunk_size,
+                offset=self._safe_offset(
+                    table_rva + MAX_IMPORT_SYMBOLS * thunk_size
+                ),
+            )
+        )
+        return True, malformed
+
+    def _append_summary_entry(
+        self,
+        entries,
+        libname,
+        function_name,
+        by_ordinal,
+        ordinal,
+        ordinal_resolved,
+        dll_offset,
+        thunk_offset,
+        name_offset,
+    ):
+        """Append one normalized imphash item in canonical order."""
+        canonical = f"{libname.lower()}.{function_name.lower()}"
+        entries.append(
+            ImportSummaryEntry(
+                dll=libname,
+                function=function_name.lower(),
+                canonical=canonical,
+                by_ordinal=by_ordinal,
+                ordinal=ordinal,
+                ordinal_resolved=ordinal_resolved,
+                source_dll_offset=dll_offset,
+                thunk_offset=thunk_offset,
+                name_offset=name_offset,
+                index=len(entries),
+            )
+        )
+
+    def _safe_offset(self, rva):
+        """Translate an RVA to a file offset, returning ``None`` on failure."""
+        try:
+            return self.get_offset_from_rva(rva)
+        except PEFormatError:
+            return None
+
 
     def get_exphash(self):
         """Return the exphash of the PE file.
