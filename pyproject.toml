@@ -50,6 +50,7 @@ path = "pefile.py"
 include = [
     "/pefile.py",
     "/peutils.py",
+    "/pefeatures.py",
     "/ordlookup",
 ]
 
@@ -57,6 +58,7 @@ include = [
 include = [
     "/pefile.py",
     "/peutils.py",
+    "/pefeatures.py",
     "/ordlookup",
     "/CITATION.cff",
     "/LICENSE",
