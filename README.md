@@ -63,6 +63,25 @@ To work with authenticated binaries, including **Authenticode signatures**, plea
 
 _pefile_ runs in several pipelines scanning hundreds of thousands of new PE files every day, and, while not perfect, it has grown to be pretty robust over time. That being said, small glitches are found now and then. If you bump into a PE that does not appear to be processed correctly, do report it, please! It will help make pefile a tiny bit more powerful.
 
+### File region view
+
+Treating every byte after the last section as a suspicious "overlay" is misleading, because the Authenticode Attribute Certificate Table normally lives there too. `PE.get_file_regions()` returns a `FileRegionView` that classifies each byte of the file and keeps the following apart:
+
+* the PE headers (`SizeOfHeaders`);
+* every section's raw data (`PointerToRawData` / `SizeOfRawData`);
+* the security (certificate) directory and each aligned `WIN_CERTIFICATE` entry;
+* unclaimed gaps inside the image and the genuine trailing overlay.
+
+Each `FileRegion` records both its declared span (what the headers claim) and its actual, file-bounded span (what the file really contains), and every region's bytes can be read back with `region.data()`. The security directory's `VirtualAddress` is interpreted as a raw file offset (not an RVA). Out-of-bounds declarations, misaligned or overlapping certificate entries, and certificate/section overlaps are surfaced as explicit `anomalies` instead of being hidden by an overlay computation. Only the on-disk structure is inspected: signatures are not validated and the presence of a certificate table does not imply the file is trusted.
+
+```python
+view = pe.get_file_regions()
+for region in view.regions:
+    print(region.kind, hex(region.start), hex(region.end), region.source)
+for anomaly in view.anomalies:
+    print(anomaly.code, anomaly.message)
+```
+
 ## Dependencies
 
 _pefile_ is self-contained. The module has no dependencies; it is endianness independent; and it works on Windows, macOS, and Linux.

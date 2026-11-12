@@ -150,6 +150,36 @@ DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_ARCHITECTURE"] = DIRECTORY_ENTRY[
     "IMAGE_DIRECTORY_ENTRY_COPYRIGHT"
 ]
 
+# WIN_CERTIFICATE / Attribute Certificate Table (the PE security directory).
+# The table is a sequence of 8-byte aligned WIN_CERTIFICATE entries. Note that
+# the data directory's VirtualAddress field, unlike every other directory, is a
+# raw file offset and NOT an RVA.
+WIN_CERTIFICATE_HEADER_SIZE = 8
+WIN_CERTIFICATE_ALIGNMENT = 8
+
+# wRevision values (see WIN_CERT_REVISION_*).
+WIN_CERT_REVISION_1_0 = 0x0100
+WIN_CERT_REVISION_2_0 = 0x0200
+
+# wCertificateType values (WIN_CERT_TYPE_*).
+WIN_CERT_TYPE_X509 = 0x0001
+WIN_CERT_TYPE_PKCS_SIGNED_DATA = 0x0002
+WIN_CERT_TYPE_RESERVED_1 = 0x0003
+WIN_CERT_TYPE_TS_STACK_SIGNED = 0x0004
+WIN_CERT_TYPE_EFI_PKCS115 = 0x0EF0
+WIN_CERT_TYPE_EFI_GUID = 0x0EF1
+
+win_certificate_types = [
+    ("WIN_CERT_TYPE_X509", WIN_CERT_TYPE_X509),
+    ("WIN_CERT_TYPE_PKCS_SIGNED_DATA", WIN_CERT_TYPE_PKCS_SIGNED_DATA),
+    ("WIN_CERT_TYPE_RESERVED_1", WIN_CERT_TYPE_RESERVED_1),
+    ("WIN_CERT_TYPE_TS_STACK_SIGNED", WIN_CERT_TYPE_TS_STACK_SIGNED),
+    ("WIN_CERT_TYPE_EFI_PKCS115", WIN_CERT_TYPE_EFI_PKCS115),
+    ("WIN_CERT_TYPE_EFI_GUID", WIN_CERT_TYPE_EFI_GUID),
+]
+
+WIN_CERTIFICATE_TYPE = two_way_dict(win_certificate_types)
+
 image_characteristics = [
     ("IMAGE_FILE_RELOCS_STRIPPED", 0x0001),
     ("IMAGE_FILE_EXECUTABLE_IMAGE", 0x0002),
@@ -2351,6 +2381,242 @@ def is_valid_function_name(
         and isinstance(s, (str, bytes, bytearray))
         and all(c in (allowed_function_name + allowed_extra) for c in set(s))
     )
+
+
+# Kinds of regions reported by PE.get_file_regions().
+REGION_KIND_HEADER = "header"
+REGION_KIND_SECTION = "section"
+REGION_KIND_CERTIFICATE_TABLE = "certificate_table"
+REGION_KIND_CERTIFICATE_ENTRY = "certificate_entry"
+REGION_KIND_GAP = "gap"
+REGION_KIND_OVERLAY = "overlay"
+
+# Stable codes for structural problems found while building the region view.
+REGION_ANOMALY_HEADER_OUT_OF_BOUNDS = "header_out_of_bounds"
+REGION_ANOMALY_SECTION_OUT_OF_BOUNDS = "section_out_of_bounds"
+REGION_ANOMALY_SECURITY_DIR_EMPTY = "security_directory_empty"
+REGION_ANOMALY_SECURITY_DIR_OUT_OF_BOUNDS = "security_directory_out_of_bounds"
+REGION_ANOMALY_CERT_ENTRY_TRUNCATED_HEADER = "certificate_entry_truncated_header"
+REGION_ANOMALY_CERT_ENTRY_TOO_SMALL = "certificate_entry_too_small"
+REGION_ANOMALY_CERT_ENTRY_OUT_OF_BOUNDS = "certificate_entry_out_of_bounds"
+REGION_ANOMALY_CERT_ENTRY_NOT_ALIGNED = "certificate_entry_not_aligned"
+REGION_ANOMALY_CERT_TABLE_SIZE_NOT_ALIGNED = "certificate_table_size_not_aligned"
+REGION_ANOMALY_CERT_ENTRY_OVERLAP = "certificate_entry_overlap"
+REGION_ANOMALY_CERTIFICATE_OVERLAPS_HEADER = "certificate_overlaps_header"
+REGION_ANOMALY_CERTIFICATE_OVERLAPS_SECTION = "certificate_overlaps_section"
+REGION_ANOMALY_REGION_OVERLAP = "region_overlap"
+
+
+class RegionAnomaly:
+    """A structural problem detected while constructing a FileRegionView.
+
+    Anomalies are recorded explicitly instead of being silently absorbed into
+    the overlay calculation. They never express an opinion about whether a
+    signature is valid or whether the file is trustworthy.
+    """
+
+    def __init__(self, code, message, regions=None):
+        self.code = code
+        self.message = message
+        self.regions = list(regions) if regions else []
+
+    def __repr__(self):
+        return "RegionAnomaly(code={!r}, message={!r})".format(
+            self.code, self.message
+        )
+
+    def __eq__(self, other):
+        return (
+            isinstance(other, RegionAnomaly)
+            and self.code == other.code
+            and self.message == other.message
+        )
+
+    def __hash__(self):
+        return hash((self.code, self.message))
+
+
+class FileRegion:
+    """A contiguous, half-open byte interval within the PE file: [start, end).
+
+    `declared_start`/`declared_end` describe what the headers claim, even when
+    the claim points outside the file. `start`/`end` describe what the file
+    actually contains and are always bounded by the real file size, so `data()`
+    can always read them back. A region whose declaration is fully out of bounds
+    has `start == end` and an empty actual span.
+    """
+
+    def __init__(
+        self,
+        kind,
+        start,
+        end,
+        source,
+        raw_data,
+        declared_start=None,
+        declared_end=None,
+        name=None,
+        metadata=None,
+    ):
+        self.kind = kind
+        self.start = start
+        self.end = end
+        # What declares this interval and where the values came from.
+        self.source = source
+        # The backing buffer is shared by reference; it is not copied.
+        self._raw_data = raw_data
+        self.declared_start = start if declared_start is None else declared_start
+        self.declared_end = end if declared_end is None else declared_end
+        self.name = name
+        self.metadata = metadata if metadata is not None else {}
+        self.anomalies = []
+
+    @property
+    def size(self):
+        return self.end - self.start
+
+    @property
+    def declared_size(self):
+        return self.declared_end - self.declared_start
+
+    @property
+    def is_out_of_bounds(self):
+        return self.declared_end > len(self._raw_data) or (
+            self.declared_start < 0 or self.declared_end < 0
+        )
+
+    @property
+    def is_truncated(self):
+        return self.declared_size != self.size
+
+    def overlaps(self, other):
+        return self.start < other.end and other.start < self.end
+
+    def data(self):
+        """Return the actual bytes backing this region; always readable."""
+        return self._raw_data[self.start : self.end]
+
+    def __repr__(self):
+        return (
+            "FileRegion(kind={!r}, name={!r}, start=0x{:x}, end=0x{:x}, "
+            "declared=[0x{:x}, 0x{:x}), source={!r})".format(
+                self.kind,
+                self.name,
+                self.start,
+                self.end,
+                self.declared_start,
+                self.declared_end,
+                self.source,
+            )
+        )
+
+
+class CertificateEntry:
+    """One WIN_CERTIFICATE entry inside the security directory.
+
+    Only the structure is parsed (dwLength, wRevision, wCertificateType,
+    bCertificate). The cryptographic content is treated as opaque bytes; no
+    signature validation is performed.
+    """
+
+    def __init__(
+        self,
+        index,
+        file_offset,
+        dw_length,
+        revision,
+        certificate_type,
+        region,
+        aligned=False,
+    ):
+        self.index = index
+        self.file_offset = file_offset
+        self.dwLength = dw_length
+        self.wRevision = revision
+        self.wCertificateType = certificate_type
+        self.region = region
+        self.aligned = aligned
+
+    @property
+    def certificate_type_name(self):
+        return WIN_CERTIFICATE_TYPE.get(self.wCertificateType)
+
+    def __repr__(self):
+        return (
+            "CertificateEntry(index={}, offset=0x{:x}, dwLength=0x{:x}, "
+            "wRevision=0x{:04x}, wCertificateType=0x{:04x})".format(
+                self.index,
+                self.file_offset,
+                self.dwLength,
+                self.wRevision,
+                self.wCertificateType,
+            )
+        )
+
+
+class FileRegionView:
+    """A classification of every byte of a PE file into declared regions.
+
+    The view keeps the certificate table, section data, unclaimed gaps and the
+    genuine trailing overlay separate rather than treating every byte past the
+    last section as a suspicious overlay. Each FileRegion carries both its
+    declared span (what the headers claim) and its actual span (what the file
+    really covers); structural conflicts are exposed through `anomalies`.
+    """
+
+    def __init__(self, raw_data):
+        self._raw_data = raw_data
+        self.regions = []
+        self.anomalies = []
+        self.certificate_entries = []
+
+    @property
+    def file_size(self):
+        return len(self._raw_data)
+
+    def _regions_of_kind(self, kind):
+        return [region for region in self.regions if region.kind == kind]
+
+    @property
+    def header(self):
+        regions = self._regions_of_kind(REGION_KIND_HEADER)
+        return regions[0] if regions else None
+
+    @property
+    def sections(self):
+        return self._regions_of_kind(REGION_KIND_SECTION)
+
+    @property
+    def certificate_table(self):
+        regions = self._regions_of_kind(REGION_KIND_CERTIFICATE_TABLE)
+        return regions[0] if regions else None
+
+    @property
+    def gaps(self):
+        return self._regions_of_kind(REGION_KIND_GAP)
+
+    @property
+    def overlay(self):
+        regions = self._regions_of_kind(REGION_KIND_OVERLAY)
+        return regions[0] if regions else None
+
+    def get_overlay_data(self):
+        """Return the bytes of the genuine trailing overlay, or None."""
+        overlay = self.overlay
+        return overlay.data() if overlay is not None else None
+
+    def read_region(self, region):
+        """Read back the raw bytes of any region produced by this view."""
+        return self._raw_data[region.start : region.end]
+
+    def add_anomaly(self, anomaly, regions=None):
+        self.anomalies.append(anomaly)
+        for region in regions or []:
+            if region is not None and anomaly not in region.anomalies:
+                region.anomalies.append(anomaly)
+
+    def anomaly_codes(self):
+        return [anomaly.code for anomaly in self.anomalies]
 
 
 class PE:
@@ -7861,9 +8127,426 @@ class PE:
             )
         )
 
+    def get_file_regions(self):
+        """Build a structural view of how every byte of the file is accounted for.
+
+        The returned :class:`FileRegionView` keeps four different things apart
+        that a naive "everything past the last section is overlay" rule conflates:
+
+        * the PE headers (``SizeOfHeaders``);
+        * each section's raw data (``PointerToRawData`` / ``SizeOfRawData``);
+        * the Attribute Certificate Table pointed to by the
+          ``IMAGE_DIRECTORY_ENTRY_SECURITY`` directory, including every aligned
+          ``WIN_CERTIFICATE`` entry;
+        * unclaimed gaps inside the image and the genuine trailing overlay.
+
+        The security directory's ``VirtualAddress`` is a raw file offset (not an
+        RVA, unlike every other directory) and its ``Size`` covers the whole
+        certificate table including padding. Both the declared span and the
+        actual, file-bounded span of every region are retained, and out-of-bounds
+        declarations, misaligned or overlapping entries and certificate/section
+        overlaps are reported as explicit anomalies instead of being hidden by an
+        overlay computation.
+
+        Only the on-disk structure is analysed. Signatures are never validated and
+        the mere presence of a certificate table does not imply trustworthiness.
+        Every returned region's actual span is bounded by the real file, so the
+        bytes of every region can always be read back via ``data()`` /
+        :meth:`FileRegionView.read_region`.
+        """
+
+        data = self.__data__
+        file_size = len(data)
+        view = FileRegionView(data)
+
+        def add_region(region):
+            view.regions.append(region)
+            return region
+
+        def add_anomaly(code, message, regions=None):
+            view.add_anomaly(RegionAnomaly(code, message, regions), regions)
+
+        def clamp(offset):
+            return max(0, min(offset, file_size))
+
+        def make_region(kind, declared_start, declared_end, source, **kwargs):
+            declared_start = max(0, declared_start)
+            declared_end = max(0, declared_end)
+            actual_start = clamp(declared_start)
+            actual_end = clamp(declared_end)
+            if actual_end < actual_start:
+                actual_end = actual_start
+            return FileRegion(
+                kind,
+                actual_start,
+                actual_end,
+                source,
+                data,
+                declared_start=declared_start,
+                declared_end=declared_end,
+                **kwargs,
+            )
+
+        # --- Headers: declared by IMAGE_OPTIONAL_HEADER.SizeOfHeaders --------
+        header_region = None
+        if hasattr(self, "OPTIONAL_HEADER"):
+            size_of_headers = self.OPTIONAL_HEADER.SizeOfHeaders
+            header_region = add_region(
+                make_region(
+                    REGION_KIND_HEADER,
+                    0,
+                    size_of_headers,
+                    "OPTIONAL_HEADER.SizeOfHeaders",
+                    name="headers",
+                )
+            )
+            if size_of_headers > file_size:
+                add_anomaly(
+                    REGION_ANOMALY_HEADER_OUT_OF_BOUNDS,
+                    "SizeOfHeaders=0x{:x} exceeds file size 0x{:x}".format(
+                        size_of_headers, file_size
+                    ),
+                    [header_region],
+                )
+
+        # --- Sections: declared by each IMAGE_SECTION_HEADER -----------------
+        for section in self.sections:
+            pointer = section.PointerToRawData
+            raw_size = section.SizeOfRawData
+            section_name = section.Name.rstrip(b"\x00")
+            try:
+                section_name = section_name.decode("utf-8", "replace")
+            except (AttributeError, UnicodeDecodeError):
+                section_name = repr(section.Name)
+            section_region = add_region(
+                make_region(
+                    REGION_KIND_SECTION,
+                    pointer,
+                    pointer + raw_size,
+                    "IMAGE_SECTION_HEADER.PointerToRawData/SizeOfRawData",
+                    name=section_name,
+                    metadata={
+                        "PointerToRawData": pointer,
+                        "SizeOfRawData": raw_size,
+                    },
+                )
+            )
+            if pointer > file_size or pointer + raw_size > file_size:
+                add_anomaly(
+                    REGION_ANOMALY_SECTION_OUT_OF_BOUNDS,
+                    "Section {!r} declares [0x{:x}, 0x{:x}) beyond file size "
+                    "0x{:x}".format(section_name, pointer, pointer + raw_size, file_size),
+                    [section_region],
+                )
+
+        # --- Attribute Certificate Table (security directory) ----------------
+        security_directory = None
+        if hasattr(self, "OPTIONAL_HEADER"):
+            try:
+                security_directory = self.OPTIONAL_HEADER.DATA_DIRECTORY[
+                    DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"]
+                ]
+            except IndexError:
+                security_directory = None
+
+        cert_table_region = None
+        if (
+            security_directory is not None
+            and (security_directory.VirtualAddress or security_directory.Size)
+        ):
+            # For this directory only, VirtualAddress is a raw file offset.
+            cert_offset = security_directory.VirtualAddress
+            cert_size = security_directory.Size
+            cert_declared_end = cert_offset + cert_size
+            cert_actual_start = clamp(cert_offset)
+            cert_actual_end = clamp(cert_declared_end)
+
+            cert_table_region = add_region(
+                make_region(
+                    REGION_KIND_CERTIFICATE_TABLE,
+                    cert_offset,
+                    cert_declared_end,
+                    "DATA_DIRECTORY[IMAGE_DIRECTORY_ENTRY_SECURITY]",
+                    name="certificate_table",
+                    metadata={"VirtualAddress": cert_offset, "Size": cert_size},
+                )
+            )
+
+            if cert_actual_end <= cert_actual_start:
+                add_anomaly(
+                    REGION_ANOMALY_SECURITY_DIR_OUT_OF_BOUNDS,
+                    "Security directory declares [0x{:x}, 0x{:x}) but no byte of "
+                    "it lies inside the file (size 0x{:x})".format(
+                        cert_offset, cert_declared_end, cert_size
+                    ),
+                    [cert_table_region],
+                )
+            elif cert_declared_end > file_size:
+                add_anomaly(
+                    REGION_ANOMALY_SECURITY_DIR_OUT_OF_BOUNDS,
+                    "Security directory declares [0x{:x}, 0x{:x}) beyond file size "
+                    "0x{:x}".format(cert_offset, cert_declared_end, file_size),
+                    [cert_table_region],
+                )
+
+            if cert_size % WIN_CERTIFICATE_ALIGNMENT != 0:
+                add_anomaly(
+                    REGION_ANOMALY_CERT_TABLE_SIZE_NOT_ALIGNED,
+                    "Security directory Size=0x{:x} is not a multiple of {} "
+                    "bytes".format(cert_size, WIN_CERTIFICATE_ALIGNMENT),
+                    [cert_table_region],
+                )
+
+            # Walk the WIN_CERTIFICATE entries, bounded by what the file holds.
+            cursor = cert_actual_start
+            entry_index = 0
+            # Only walk while the entry header can physically be read.
+            while cursor + WIN_CERTIFICATE_HEADER_SIZE <= cert_actual_end:
+                header_bytes = data[
+                    cursor : cursor + WIN_CERTIFICATE_HEADER_SIZE
+                ]
+                dw_length, revision, cert_type = struct.unpack("<IHH", header_bytes)
+                entry_declared_end = cursor + dw_length
+
+                if dw_length < WIN_CERTIFICATE_HEADER_SIZE:
+                    entry_region = make_region(
+                        REGION_KIND_CERTIFICATE_ENTRY,
+                        cursor,
+                        cursor + WIN_CERTIFICATE_HEADER_SIZE,
+                        "WIN_CERTIFICATE.dwLength",
+                        name="certificate_entry_{}".format(entry_index),
+                    )
+                    add_region(entry_region)
+                    add_anomaly(
+                        REGION_ANOMALY_CERT_ENTRY_TOO_SMALL,
+                        "WIN_CERTIFICATE #{} at 0x{:x} has dwLength=0x{:x} "
+                        "smaller than the 8-byte header".format(
+                            entry_index, cursor, dw_length
+                        ),
+                        [entry_region, cert_table_region],
+                    )
+                    break
+
+                entry_region = make_region(
+                    REGION_KIND_CERTIFICATE_ENTRY,
+                    cursor,
+                    entry_declared_end,
+                    "WIN_CERTIFICATE.dwLength",
+                    name="certificate_entry_{}".format(entry_index),
+                    metadata={
+                        "dwLength": dw_length,
+                        "wRevision": revision,
+                        "wCertificateType": cert_type,
+                    },
+                )
+                add_region(entry_region)
+
+                aligned = cursor % WIN_CERTIFICATE_ALIGNMENT == 0
+                if not aligned:
+                    add_anomaly(
+                        REGION_ANOMALY_CERT_ENTRY_NOT_ALIGNED,
+                        "WIN_CERTIFICATE #{} starts at 0x{:x}, not {}-byte "
+                        "aligned".format(
+                            entry_index, cursor, WIN_CERTIFICATE_ALIGNMENT
+                        ),
+                        [entry_region, cert_table_region],
+                    )
+
+                if entry_declared_end > cert_actual_end:
+                    add_anomaly(
+                        REGION_ANOMALY_CERT_ENTRY_OUT_OF_BOUNDS,
+                        "WIN_CERTIFICATE #{} declares [0x{:x}, 0x{:x}) beyond "
+                        "the readable certificate table end 0x{:x}".format(
+                            entry_index,
+                            cursor,
+                            entry_declared_end,
+                            cert_actual_end,
+                        ),
+                        [entry_region, cert_table_region],
+                    )
+
+                entry = CertificateEntry(
+                    entry_index,
+                    cursor,
+                    dw_length,
+                    revision,
+                    cert_type,
+                    entry_region,
+                    aligned=aligned,
+                )
+                view.certificate_entries.append(entry)
+
+                if entry_declared_end > cert_actual_end:
+                    # Cannot trust dwLength to locate the next entry.
+                    break
+
+                entry_index += 1
+                next_cursor = cursor + dw_length
+                if next_cursor % WIN_CERTIFICATE_ALIGNMENT != 0:
+                    add_anomaly(
+                        REGION_ANOMALY_CERT_ENTRY_NOT_ALIGNED,
+                        "WIN_CERTIFICATE #{} dwLength=0x{:x} does not end on an "
+                        "{}-byte boundary".format(
+                            entry_index - 1, dw_length, WIN_CERTIFICATE_ALIGNMENT
+                        ),
+                        [entry_region, cert_table_region],
+                    )
+                    next_cursor = (
+                        (next_cursor + WIN_CERTIFICATE_ALIGNMENT - 1)
+                        // WIN_CERTIFICATE_ALIGNMENT
+                        * WIN_CERTIFICATE_ALIGNMENT
+                    )
+                cursor = next_cursor
+
+            # Bytes remain (or the whole table is short) but no complete
+            # WIN_CERTIFICATE header can be read at the next position.
+            if (
+                cursor < cert_actual_end
+                and cursor + WIN_CERTIFICATE_HEADER_SIZE > cert_actual_end
+            ):
+                add_anomaly(
+                    REGION_ANOMALY_CERT_ENTRY_TRUNCATED_HEADER,
+                    "Certificate table at 0x{:x} ends at 0x{:x} with fewer than "
+                    "{} bytes left for a WIN_CERTIFICATE header at 0x{:x}".format(
+                        cert_actual_start,
+                        cert_actual_end,
+                        WIN_CERTIFICATE_HEADER_SIZE,
+                        cursor,
+                    ),
+                    [cert_table_region],
+                )
+        elif (
+            security_directory is not None
+            and security_directory.VirtualAddress == 0
+            and security_directory.Size != 0
+        ):
+            add_anomaly(
+                REGION_ANOMALY_SECURITY_DIR_EMPTY,
+                "Security directory has Size=0x{:x} but VirtualAddress=0".format(
+                    security_directory.Size
+                ),
+            )
+
+        # --- Conflicts between declared structural regions -------------------
+        structural = [
+            region
+            for region in view.regions
+            if region.kind
+            in (
+                REGION_KIND_HEADER,
+                REGION_KIND_SECTION,
+                REGION_KIND_CERTIFICATE_TABLE,
+            )
+            and region.size > 0
+        ]
+        for index, left in enumerate(structural):
+            for right in structural[index + 1 :]:
+                if not left.overlaps(right):
+                    continue
+                cert_involved = (
+                    REGION_KIND_CERTIFICATE_TABLE in (left.kind, right.kind)
+                )
+                if cert_involved:
+                    cert_region = (
+                        left
+                        if left.kind == REGION_KIND_CERTIFICATE_TABLE
+                        else right
+                    )
+                    other = (
+                        right
+                        if left.kind == REGION_KIND_CERTIFICATE_TABLE
+                        else left
+                    )
+                    if other.kind == REGION_KIND_HEADER:
+                        code = REGION_ANOMALY_CERTIFICATE_OVERLAPS_HEADER
+                        description = "the PE headers"
+                    else:
+                        code = REGION_ANOMALY_CERTIFICATE_OVERLAPS_SECTION
+                        description = "section {!r}".format(other.name)
+                    add_anomaly(
+                        code,
+                        "Certificate table [0x{:x}, 0x{:x}) overlaps {} "
+                        "[0x{:x}, 0x{:x})".format(
+                            cert_region.start,
+                            cert_region.end,
+                            description,
+                            other.start,
+                            other.end,
+                        ),
+                        [left, right],
+                    )
+                else:
+                    add_anomaly(
+                        REGION_ANOMALY_REGION_OVERLAP,
+                        "{} {!r} [0x{:x}, 0x{:x}) overlaps {} {!r} "
+                        "[0x{:x}, 0x{:x})".format(
+                            left.kind,
+                            left.name,
+                            left.start,
+                            left.end,
+                            right.kind,
+                            right.name,
+                            right.start,
+                            right.end,
+                        ),
+                        [left, right],
+                    )
+
+        # --- Actual file coverage: gaps vs. genuine overlay ------------------
+        covered = bytearray(file_size)
+        for region in structural:
+            covered[region.start : region.end] = b"\x01" * region.size
+
+        structural_end = max(
+            (region.end for region in structural), default=0
+        )
+
+        if structural_end < file_size:
+            add_region(
+                FileRegion(
+                    REGION_KIND_OVERLAY,
+                    structural_end,
+                    file_size,
+                    "trailing bytes beyond every declared region",
+                    data,
+                    name="overlay",
+                )
+            )
+
+        # Unclaimed bytes before structural_end are gaps, not overlay.
+        offset = 0
+        while offset < structural_end:
+            if covered[offset]:
+                offset += 1
+                continue
+            gap_start = offset
+            while offset < structural_end and not covered[offset]:
+                offset += 1
+            add_region(
+                FileRegion(
+                    REGION_KIND_GAP,
+                    gap_start,
+                    offset,
+                    "unclaimed bytes (no header/section/certificate claim)",
+                    data,
+                    name="gap",
+                )
+            )
+
+        view.regions.sort(key=lambda region: (region.start, region.end, region.kind))
+        return view
+
     def get_overlay_data_start_offset(self):
         """Get the offset of data appended to the file and not contained within
         the area described in the headers.
+
+        This is a convenience helper that treats the single highest, in-bounds
+        declared extent as the end of the image. It deliberately ignores the
+        security directory, so on a signed file the certificate table can be
+        reported together with any trailing bytes. For a classification that
+        keeps headers, sections, the certificate table, unclaimed gaps and the
+        genuine overlay separate (and that reports malformed or overlapping
+        declarations explicitly), use :meth:`get_file_regions` instead.
         """
 
         largest_offset_and_size = (0, 0)
