@@ -150,6 +150,14 @@ DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_ARCHITECTURE"] = DIRECTORY_ENTRY[
     "IMAGE_DIRECTORY_ENTRY_COPYRIGHT"
 ]
 
+# Maps data directory names to the short source names used by the unified
+# dependency evidence report.
+DEPENDENCY_DIRECTORIES = {
+    "IMAGE_DIRECTORY_ENTRY_IMPORT": "import",
+    "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT": "delay_import",
+    "IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT": "bound_import",
+}
+
 image_characteristics = [
     ("IMAGE_FILE_RELOCS_STRIPPED", 0x0001),
     ("IMAGE_FILE_EXECUTABLE_IMAGE", 0x0002),
@@ -1822,6 +1830,176 @@ class BoundImportRefData(DataContainer):
     """
 
 
+class DependencyEvidence(DataContainer):
+    """Holds one dependency record from any of the three import directories.
+
+    All records share the same shape while keeping the source directory and
+    the type-specific meaning of each field explicit:
+
+    directory:       source directory ("import", "delay_import" or
+                     "bound_import")
+    kind:            "symbol" for regular/delay import symbols,
+                     "dll_descriptor" for bound import descriptors and
+                     forwarder references
+    dll:             name of the referenced DLL, as found in that directory
+    dll_valid:       False when the DLL name was rejected as invalid, True for
+                     valid names, None when the name could not be recovered
+    name:            imported symbol name, None for ordinal imports or for
+                     bound descriptors
+    ordinal:         imported ordinal, None when importing by name or for
+                     bound descriptors
+    hint:            hint value for named imports, None otherwise
+    address:         type-specific address field, see address_kind
+    address_kind:    "iat_slot_va" for regular/delay IAT slot addresses,
+                     "unresolved_thunk_pointer" for a pointer that could not
+                     be resolved, "none" for bound descriptors
+    address_base:    "image_base" for IAT slot addresses, "not_an_address"
+                     for bound descriptors, "unknown" for bad pointers
+    time_date_stamp: raw bound descriptor timestamp when present, None
+                     otherwise. It is untrusted metadata and is never used as
+                     a DLL identity.
+    timestamp_trusted: False for bound timestamp values, None otherwise
+    resolution_mode: "rva" or "va" for delay imports, describing how the
+                     descriptor pointer fields were interpreted;
+                     "not_applicable" for bound descriptors
+    thunk_rva:       RVA of the thunk entry the symbol was read from, if any
+    thunk_offset:    file offset of the record in the source directory
+    bound:           bound address recorded in the IAT, if any
+    resolved:        True when the record's identity was fully recovered
+    reason:          machine-readable reason when not resolved, else None
+    detail:          human-readable explanation for unresolved records
+    """
+
+
+class DependencyEvidenceReport(DataContainer):
+    """Holds unified dependency evidence for regular, delay and bound imports.
+
+    entries:        list of DependencyEvidence records from every directory
+    by_dll:         dict mapping the lowercased DLL name to records from all
+                    directories that reference the same DLL
+    sources:        dict mapping directory name to its RVA, size and parsing
+                    status
+    diagnostics:    list of dicts with machine-readable parsing problems
+    """
+
+    def get_entries(self, dll=None, directory=None, kind=None):
+        """Return records, optionally filtered by DLL, directory and kind."""
+        result = self.entries
+        if directory is not None:
+            result = [entry for entry in result if entry.directory == directory]
+        if kind is not None:
+            result = [entry for entry in result if entry.kind == kind]
+        if dll is not None:
+            dll_lower = dll.lower()
+            result = [
+                entry
+                for entry in result
+                if entry.dll is not None and entry.dll.lower() == dll_lower
+            ]
+        return result
+
+    def get_dlls(self):
+        """Return the distinct DLL names present across every directory."""
+        seen = {}
+        for entry in self.entries:
+            if entry.dll is None:
+                continue
+            seen.setdefault(entry.dll.lower(), entry.dll)
+        return list(seen.values())
+
+    def get_unresolved(self, dll=None, directory=None):
+        """Return records that could not be fully resolved."""
+        return [
+            entry
+            for entry in self.get_entries(dll=dll, directory=directory)
+            if not entry.resolved
+        ]
+
+    def get_conflicts(self, dll=None):
+        """Return symbols whose representation differs across directories.
+
+        Records that reference the same DLL are correlated, but no record is
+        dropped or overwritten: every observed representation is listed with
+        the directories it came from. Bound DLL descriptors are not symbols
+        and therefore never take part in symbol-conflict correlation.
+
+        Unresolved symbol records (for example a bad hint/name pointer) are
+        always included, even when they come from a single directory, so a
+        conflict summary cannot hide them. Those entries carry
+        ``resolution == "unresolved"``; identity conflicts carry
+        ``resolution == "conflict"``.
+        """
+        candidates = self.get_entries(dll=dll, kind="symbol")
+        grouped = {}
+        for entry in candidates:
+            if entry.name is not None:
+                key = ("name", entry.name.lower())
+            elif entry.ordinal is not None:
+                key = ("ordinal", entry.ordinal)
+            else:
+                key = ("unresolved", entry.reason)
+            grouped.setdefault(key, []).append(entry)
+
+        conflicts = {}
+        for key, group in grouped.items():
+            by_directory = {}
+            representations = {}
+            has_unresolved = False
+            for entry in group:
+                by_directory.setdefault(entry.directory, []).append(entry)
+                if not entry.resolved:
+                    has_unresolved = True
+                # IAT slot addresses necessarily differ between directories;
+                # conflict detection is about symbol identity, not slot layout.
+                representation = (
+                    None if entry.name is None else entry.name,
+                    entry.ordinal,
+                    entry.hint,
+                    entry.resolved,
+                    entry.reason,
+                )
+                representations.setdefault(representation, []).append(entry.directory)
+
+            if not has_unresolved and (
+                len(by_directory) < 2 or len(representations) < 2
+            ):
+                continue
+            conflicts.setdefault(group[0].dll.lower(), []).append(
+                {
+                    "symbol": key,
+                    "resolution": "unresolved" if has_unresolved else "conflict",
+                    "representations": [
+                        {
+                            "name": representation[0],
+                            "ordinal": representation[1],
+                            "hint": representation[2],
+                            "resolved": representation[3],
+                            "reason": representation[4],
+                            "sources": sorted(set(source_names)),
+                        }
+                        for representation, source_names in representations.items()
+                    ],
+                    "records": {
+                        directory: [
+                            {
+                                "name": entry.name,
+                                "ordinal": entry.ordinal,
+                                "hint": entry.hint,
+                                "address": entry.address,
+                                "address_kind": entry.address_kind,
+                                "resolved": entry.resolved,
+                                "reason": entry.reason,
+                                "detail": entry.detail,
+                            }
+                            for entry in directory_entries
+                        ]
+                        for directory, directory_entries in by_directory.items()
+                    },
+                }
+            )
+        return conflicts
+
+
 class ExceptionsDirEntryData(DataContainer):
     """Holds the data related to SEH (and stack unwinding, in particular)
 
@@ -2946,6 +3124,13 @@ class PE:
 
         self.__warnings = []
 
+        # Records the per-directory status of regular, delay and bound imports.
+        # Keys are the short source names used in dependency evidence.
+        self.__dependency_sources__ = {}
+        # One entry per dependency item that could not be resolved, with the
+        # directory and location needed to reproduce the problem.
+        self.__dependency_diagnostics__ = []
+
         self.PE_TYPE = None
 
         if name is None and data is None:
@@ -3796,6 +3981,7 @@ class PE:
             # Only process all the directories if individual ones not chosen
             if directories is None or directory_index in directories:
                 value = None
+                error = None
                 if dir_entry.VirtualAddress:
                     if (
                         forwarded_exports_only
@@ -3817,12 +4003,46 @@ class PE:
                         try:
                             value = entry[1](dir_entry.VirtualAddress, dir_entry.Size)
                         except PEFormatError as excp:
+                            error = excp
                             self.__warnings.append(
                                 f'Failed to process directory "{entry[0]}": {excp}'
                             )
 
+                    if entry[0] in DEPENDENCY_DIRECTORIES:
+                        dependency_source = {
+                            "directory": DEPENDENCY_DIRECTORIES[entry[0]],
+                            "index": directory_index,
+                            "rva": dir_entry.VirtualAddress,
+                            "size": dir_entry.Size,
+                            "parsed": value is not None and error is None,
+                            "entry_count": len(value) if value else 0,
+                        }
+                        if error is not None:
+                            dependency_source["error"] = str(error)
+                        source = self.__dependency_sources__.setdefault(
+                            dependency_source["directory"], {}
+                        )
+                        source.update(dependency_source)
+                        if value is not None:
+                            source["entry_count"] = len(value)
+
                     if value:
                         setattr(self, entry[0][6:], value)
+                elif entry[0] in DEPENDENCY_DIRECTORIES:
+                    source = self.__dependency_sources__.setdefault(
+                        DEPENDENCY_DIRECTORIES[entry[0]], {}
+                    )
+                    source.update(
+                        {
+                            "directory": DEPENDENCY_DIRECTORIES[entry[0]],
+                            "index": directory_index,
+                            "rva": dir_entry.VirtualAddress,
+                            "size": dir_entry.Size,
+                            "parsed": False,
+                            "entry_count": 0,
+                            "absent": True,
+                        }
+                    )
 
             if (
                 directories is not None
@@ -3922,7 +4142,13 @@ class PE:
         return rt_funcs
 
     def parse_directory_bound_imports(self, rva, size):
-        """Parse the bound import table."""
+        """Parse the bound import table.
+
+        A damaged descriptor stops parsing of the remaining bound descriptors
+        but already confirmed descriptors are returned. TimeDateStamp values
+        are preserved as metadata only; they are never used as a DLL identity
+        nor to link a bound entry to a regular/delay import.
+        """
 
         bnd_descr = Structure(self.__IMAGE_BOUND_IMPORT_DESCRIPTOR_format__)
         bnd_descr_size = bnd_descr.sizeof()
@@ -3936,19 +4162,28 @@ class PE:
                 file_offset=rva,
             )
             if bnd_descr is None:
-                # If can't parse directory then silently return.
-                # This directory does not necessarily have to be valid to
-                # still have a valid PE file
-
+                # If can't parse directory then stop, but keep any descriptors
+                # that were already confirmed.
                 self.__warnings.append(
                     "The Bound Imports directory exists but can't be parsed."
                 )
-
-                return None
+                self.__dependency_diagnostics__.append(
+                    {
+                        "directory": "bound_import",
+                        "reason": "unreadable_descriptor",
+                        "detail": (
+                            f"cannot unpack IMAGE_BOUND_IMPORT_DESCRIPTOR "
+                            f"at RVA {rva:#x}"
+                        ),
+                        "descriptor_rva": rva,
+                    }
+                )
+                return bound_imports
 
             if bnd_descr.all_zeroes():
                 break
 
+            descriptor_rva = rva
             rva += bnd_descr.sizeof()
 
             section = self.get_section_by_offset(rva)
@@ -3976,7 +4211,18 @@ class PE:
                     "RVA of IMAGE_BOUND_IMPORT_DESCRIPTOR points "
                     f"to an invalid address: {rva:x}"
                 )
-                return None
+                self.__dependency_diagnostics__.append(
+                    {
+                        "directory": "bound_import",
+                        "reason": "invalid_forwarder_offset",
+                        "detail": (
+                            f"descriptor at RVA {descriptor_rva:#x} points "
+                            f"past the end of its section at RVA {rva:#x}"
+                        ),
+                        "descriptor_rva": descriptor_rva,
+                    }
+                )
+                return bound_imports
 
             forwarder_refs = []
             # 8 is the size of __IMAGE_BOUND_IMPORT_DESCRIPTOR_format__
@@ -3992,7 +4238,23 @@ class PE:
                 )
 
                 if not bnd_frwd_ref:
-                    raise PEFormatError("IMAGE_BOUND_FORWARDER_REF cannot be read")
+                    self.__warnings.append(
+                        "IMAGE_BOUND_FORWARDER_REF cannot be read at RVA "
+                        f"{rva:#x}"
+                    )
+                    self.__dependency_diagnostics__.append(
+                        {
+                            "directory": "bound_import",
+                            "reason": "unreadable_forwarder_ref",
+                            "detail": (
+                                "cannot unpack IMAGE_BOUND_FORWARDER_REF "
+                                f"at RVA {rva:#x}"
+                            ),
+                            "descriptor_rva": descriptor_rva,
+                        }
+                    )
+                    return bound_imports
+                ref_rva = rva
                 rva += bnd_frwd_ref.sizeof()
 
                 offset = start + bnd_frwd_ref.OffsetModuleName
@@ -4010,7 +4272,32 @@ class PE:
                         c for c in bytearray(name_str) if chr(c) not in string.printable
                     ]
                     if len(name_str) > 256 or invalid_chars:
+                        self.__dependency_diagnostics__.append(
+                            {
+                                "directory": "bound_import",
+                                "reason": "invalid_forwarder_name",
+                                "detail": (
+                                    f"forwarder name at offset {offset:#x} "
+                                    "contains non-printable characters or is too long"
+                                ),
+                                "descriptor_rva": descriptor_rva,
+                                "entry_rva": ref_rva,
+                            }
+                        )
                         break
+                if not name_str:
+                    self.__dependency_diagnostics__.append(
+                        {
+                            "directory": "bound_import",
+                            "reason": "empty_forwarder_name",
+                            "detail": (
+                                f"forwarder name offset {offset:#x} is empty"
+                            ),
+                            "descriptor_rva": descriptor_rva,
+                            "entry_rva": ref_rva,
+                        }
+                    )
+                    continue
 
                 forwarder_refs.append(
                     BoundImportRefData(struct=bnd_frwd_ref, name=name_str)
@@ -4026,9 +4313,28 @@ class PE:
                     c for c in bytearray(name_str) if chr(c) not in string.printable
                 ]
                 if len(name_str) > 256 or invalid_chars:
+                    self.__dependency_diagnostics__.append(
+                        {
+                            "directory": "bound_import",
+                            "reason": "invalid_dll_name",
+                            "detail": (
+                                f"DLL name at offset {offset:#x} contains "
+                                "non-printable characters or is too long"
+                            ),
+                            "descriptor_rva": descriptor_rva,
+                        }
+                    )
                     break
 
             if not name_str:
+                self.__dependency_diagnostics__.append(
+                    {
+                        "directory": "bound_import",
+                        "reason": "empty_dll_name",
+                        "detail": f"DLL name offset {offset:#x} is empty",
+                        "descriptor_rva": descriptor_rva,
+                    }
+                )
                 break
             bound_imports.append(
                 BoundImportDescData(
@@ -5697,6 +6003,28 @@ class PE:
             va -= begin_of_image
         return va
 
+    def classify_import_address(self, value):
+        """Classify a raw descriptor/thunk pointer as a VA or an RVA.
+
+        Returns one of:
+          "va"          - absolute virtual address inside the loaded image
+          "rva"         - relative virtual address matching an existing section
+          "zero"        - the field is unset
+          "unmapped_va" - looks like a VA but falls outside the loaded image
+          "unmapped_rva" - non-zero value that does not match any section
+        """
+        if value == 0:
+            return "zero"
+        begin_of_image = self.OPTIONAL_HEADER.ImageBase
+        end_of_image = begin_of_image + self.OPTIONAL_HEADER.SizeOfImage
+        if begin_of_image <= value < end_of_image:
+            return "va"
+        if self.get_section_by_rva(value) is not None:
+            return "rva"
+        if value >= begin_of_image:
+            return "unmapped_va"
+        return "unmapped_rva"
+
     def parse_delay_import_directory(self, rva, size):
         """Walk and parse the delay import directory."""
         import_descs = []
@@ -5713,6 +6041,14 @@ class PE:
                 self.__warnings.append(
                     f"Error parsing the Delay import directory at RVA: {rva:#x}"
                 )
+                self.__dependency_diagnostics__.append(
+                    {
+                        "directory": "delay_import",
+                        "reason": "unreadable_descriptor",
+                        "detail": f"cannot read descriptor at RVA {rva:#x}",
+                        "descriptor_rva": rva,
+                    }
+                )
                 break
 
             file_offset = self.get_offset_from_rva(rva)
@@ -5725,7 +6061,9 @@ class PE:
             # If the structure is all zeros, we reached the end of the list
             if not import_desc or import_desc.all_zeroes():
                 break
+            descriptor_rva = rva
             contains_addresses = False
+            resolution_mode = "rva"
 
             # Handle old import descriptor that has Virtual Addresses instead of RVAs
             # This version of import descriptor is created by old Visual Studio versions
@@ -5743,10 +6081,12 @@ class PE:
                 import_desc.pUnloadIAT = self.normalize_import_va(
                     import_desc.pUnloadIAT
                 )
-                import_desc.phmod = self.normalize_import_va(import_desc.pUnloadIAT)
+                import_desc.phmod = self.normalize_import_va(import_desc.phmod)
                 import_desc.szName = self.normalize_import_va(import_desc.szName)
                 contains_addresses = True
+                resolution_mode = "va"
 
+            descriptor_diagnostics = []
             rva += import_desc.sizeof()
 
             # If the array of thunks is somewhere earlier than the import
@@ -5764,17 +6104,47 @@ class PE:
                     None,
                     max_len,
                     contains_addresses,
+                    source_directory="delay_import",
+                    source_context={
+                        "descriptor_rva": descriptor_rva,
+                        "descriptor_offset": file_offset,
+                        "dll_name_rva": import_desc.szName,
+                        "resolution_mode": resolution_mode,
+                    },
+                    diagnostics=descriptor_diagnostics,
                 )
             except PEFormatError as excp:
                 self.__warnings.append(
                     "Error parsing the Delay import directory. "
                     f"Invalid import data at RVA: {rva:#x} ({excp.value})"
                 )
+                self.__dependency_diagnostics__.append(
+                    {
+                        "directory": "delay_import",
+                        "reason": "import_data_parse_error",
+                        "detail": str(excp.value),
+                        "descriptor_rva": descriptor_rva,
+                        "descriptor_offset": file_offset,
+                        "resolution_mode": resolution_mode,
+                    }
+                )
+
+            for diagnostic in descriptor_diagnostics:
+                diagnostic["resolution_mode"] = resolution_mode
+                self.__dependency_diagnostics__.append(diagnostic)
 
             if error_count > 5:
                 self.__warnings.append(
                     "Too many errors parsing the Delay import directory. "
                     f"Invalid import data at RVA: {rva:#x}"
+                )
+                self.__dependency_diagnostics__.append(
+                    {
+                        "directory": "delay_import",
+                        "reason": "too_many_errors",
+                        "detail": "more than 5 unreadable delay descriptors",
+                        "descriptor_rva": descriptor_rva,
+                    }
                 )
                 break
 
@@ -5784,13 +6154,27 @@ class PE:
 
             if self.__total_import_symbols > MAX_IMPORT_SYMBOLS:
                 self.__warnings.append(
-                    f"Error, too many imported symbols {self.__total_import_symbols} (>{MAX_IMPORT_SYMBOLS})"
+                    "Error, too many imported symbols "
+                    f"{self.__total_import_symbols} (>{MAX_IMPORT_SYMBOLS})"
                 )
                 break
 
             dll = self.get_string_at_rva(import_desc.szName, MAX_DLL_LENGTH)
             if not is_valid_dos_filename(dll):
                 dll = b"*invalid*"
+                self.__dependency_diagnostics__.append(
+                    {
+                        "directory": "delay_import",
+                        "reason": "invalid_dll_name",
+                        "detail": (
+                            "DLL name at RVA "
+                            f"{import_desc.szName:#x} is not a valid DOS filename"
+                        ),
+                        "descriptor_rva": descriptor_rva,
+                        "descriptor_offset": file_offset,
+                        "resolution_mode": resolution_mode,
+                    }
+                )
 
             if dll:
                 for symbol in import_data:
@@ -5802,6 +6186,9 @@ class PE:
                 import_descs.append(
                     ImportDescData(struct=import_desc, imports=import_data, dll=dll)
                 )
+                # Annotate the descriptor so evidence consumers can tell how
+                # its pointer fields were interpreted.
+                import_descs[-1].resolution_mode = resolution_mode
 
         return import_descs
 
@@ -5928,6 +6315,7 @@ class PE:
             if not import_desc or import_desc.all_zeroes():
                 break
 
+            descriptor_rva = rva
             rva += import_desc.sizeof()
 
             # If the array of thunks is somewhere earlier than the import
@@ -5947,11 +6335,29 @@ class PE:
                         import_desc.FirstThunk,
                         import_desc.ForwarderChain,
                         max_length=max_len,
+                        source_directory="import",
+                        source_context={
+                            "descriptor_rva": descriptor_rva,
+                            "descriptor_offset": file_offset,
+                            "dll_name_rva": import_desc.Name,
+                            "original_first_thunk": import_desc.OriginalFirstThunk,
+                            "first_thunk": import_desc.FirstThunk,
+                        },
+                        diagnostics=self.__dependency_diagnostics__,
                     )
                 except PEFormatError as e:
                     self.__warnings.append(
                         "Error parsing the import directory. "
                         f"Invalid Import data at RVA: {rva:#x} ({e.value})"
+                    )
+                    self.__dependency_diagnostics__.append(
+                        {
+                            "directory": "import",
+                            "reason": "import_data_parse_error",
+                            "detail": str(e.value),
+                            "descriptor_rva": descriptor_rva,
+                            "descriptor_offset": file_offset,
+                        }
                     )
 
                 if error_count > 5:
@@ -5969,6 +6375,20 @@ class PE:
             dll = self.get_string_at_rva(import_desc.Name, MAX_DLL_LENGTH)
             if not is_valid_dos_filename(dll):
                 dll = b"*invalid*"
+
+            if dll == b"*invalid*":
+                self.__dependency_diagnostics__.append(
+                    {
+                        "directory": "import",
+                        "reason": "invalid_dll_name",
+                        "detail": (
+                            "DLL name at RVA "
+                            f"{import_desc.Name:#x} is not a valid DOS filename"
+                        ),
+                        "descriptor_rva": descriptor_rva,
+                        "descriptor_offset": file_offset,
+                    }
+                )
 
             if dll:
                 for symbol in import_data:
@@ -6014,12 +6434,20 @@ class PE:
         forwarder_chain,
         max_length=None,
         contains_addresses=False,
+        *,
+        source_directory=None,
+        source_context=None,
+        diagnostics=None,
     ):
         """Parse the imported symbols.
 
         It will fill a list, which will be available as the dictionary
         attribute "imports". Its keys will be the DLL names and the values
         of all the symbols imported from that object.
+
+        `source_directory` and `source_context` are optional and only used to
+        annotate unresolved entries with a locatable reason. If `diagnostics`
+        is given, one dict per unresolved thunk entry is appended to it.
         """
 
         imported_symbols = []
@@ -6041,6 +6469,19 @@ class PE:
                 f"OriginalFirstThunk: {original_first_thunk:#x} "
                 f"FirstThunk: {first_thunk:#x}"
             )
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "directory": source_directory,
+                        "reason": "empty_import_tables",
+                        "detail": "both the ILT and IAT are empty or unreadable",
+                        "thunk_rva": None,
+                        "thunk_offset": None,
+                        "ilt_rva": original_first_thunk,
+                        "iat_rva": first_thunk,
+                        "context": dict(source_context or {}),
+                    }
+                )
             return []
 
         if ilt:
@@ -6065,6 +6506,7 @@ class PE:
             ordinal_flag = IMAGE_ORDINAL_FLAG
 
         num_invalid = 0
+        num_unresolved = 0
         for idx, tbl_entry in enumerate(table):
             imp_ord = None
             imp_hint = None
@@ -6072,6 +6514,10 @@ class PE:
             name_offset = None
             hint_name_table_rva = None
             import_by_ordinal = False  # declare it here first
+            thunk_offset = tbl_entry.get_file_offset()
+            thunk_rva = self.get_rva_from_offset(thunk_offset)
+            unresolved_reason = None
+            unresolved_detail = None
 
             if tbl_entry.AddressOfData:
                 # If imported by ordinal, we will append the ordinal number
@@ -6082,8 +6528,9 @@ class PE:
                     name_offset = None
                 else:
                     import_by_ordinal = False
+                    thunk_address = tbl_entry.AddressOfData & address_mask
                     try:
-                        hint_name_table_rva = tbl_entry.AddressOfData & address_mask
+                        hint_name_table_rva = thunk_address
                         data = self.get_data(hint_name_table_rva, 2)
                         # Get the Hint
                         imp_hint = self.get_word_from_data(data, 0)
@@ -6091,17 +6538,26 @@ class PE:
                             tbl_entry.AddressOfData + 2, MAX_IMPORT_NAME_LENGTH
                         )
                         if not is_valid_function_name(imp_name):
+                            unresolved_reason = "invalid_symbol_name"
+                            unresolved_detail = (
+                                "name at RVA "
+                                f"{tbl_entry.AddressOfData + 2:#x} contains "
+                                "characters that cannot be a symbol name"
+                            )
                             imp_name = b"*invalid*"
 
                         name_offset = self.get_offset_from_rva(
                             tbl_entry.AddressOfData + 2
                         )
-                    except PEFormatError:
-                        pass
-
-                # by nriva: we want the ThunkRVA and ThunkOffset
-                thunk_offset = tbl_entry.get_file_offset()
-                thunk_rva = self.get_rva_from_offset(thunk_offset)
+                    except PEFormatError as excp:
+                        unresolved_reason = "unreadable_hint_name"
+                        unresolved_detail = (
+                            f"cannot read hint/name at RVA {thunk_address:#x}: "
+                            f"{excp.value}"
+                        )
+            else:
+                unresolved_reason = "null_thunk"
+                unresolved_detail = "thunk entry has AddressOfData == 0"
 
             imp_address = (
                 first_thunk + self.OPTIONAL_HEADER.ImageBase + idx * imp_offset
@@ -6124,10 +6580,28 @@ class PE:
             # has an invalid table built in a way that it's parseable but contains
             # invalid entries that lead pefile to take extremely long amounts of time to
             # parse. It also leads to extreme memory consumption.
-            # To prevent similar cases, if invalid entries are found in the middle of a
-            # table the parsing will be aborted
+            # To prevent similar cases, if too many invalid entries are found in a
+            # row the parsing is aborted, but entries already confirmed are kept and
+            # every skipped entry has a locatable reason.
             if imp_ord is None and imp_name is None:
-                raise PEFormatError("Invalid entries, aborting parsing.")
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "directory": source_directory,
+                            "reason": unresolved_reason or "invalid_thunk_entry",
+                            "detail": unresolved_detail
+                            or "thunk entry has neither an ordinal nor a name",
+                            "thunk_rva": thunk_rva,
+                            "thunk_offset": thunk_offset,
+                            "address_of_data": tbl_entry.AddressOfData,
+                            "hint_name_table_rva": hint_name_table_rva,
+                            "context": dict(source_context or {}),
+                        }
+                    )
+                num_unresolved += 1
+                if num_unresolved > 1000:
+                    raise PEFormatError("Too many invalid entries, aborting parsing.")
+                continue
 
             # Some PEs appear to interleave valid and invalid imports. Instead of
             # aborting the parsing altogether we will simply skip the invalid entries.
@@ -6136,6 +6610,19 @@ class PE:
                 if num_invalid > 1000 and num_invalid == idx:
                     raise PEFormatError("Too many invalid names, aborting parsing.")
                 num_invalid += 1
+                if diagnostics is not None:
+                    diagnostics.append(
+                        {
+                            "directory": source_directory,
+                            "reason": unresolved_reason,
+                            "detail": unresolved_detail,
+                            "thunk_rva": thunk_rva,
+                            "thunk_offset": thunk_offset,
+                            "address_of_data": tbl_entry.AddressOfData,
+                            "hint_name_table_rva": hint_name_table_rva,
+                            "context": dict(source_context or {}),
+                        }
+                    )
                 continue
 
             if imp_ord or imp_name:
@@ -6160,6 +6647,250 @@ class PE:
                 )
 
         return imported_symbols
+
+    def get_dependency_evidence(self):
+        """Return unified evidence for regular, delay and bound imports.
+
+        The three directories are presented side by side, each record keeping
+        the directory it came from and a type-specific interpretation of its
+        address fields. Records referencing the same DLL are grouped together
+        under ``by_dll`` but conflicting symbols and unresolved records are
+        preserved, never merged away.
+
+        Bound import timestamps are exposed only as untrusted metadata
+        (``time_date_stamp`` with ``timestamp_trusted=False``); they are
+        deliberately not used as a DLL identity. Regular and delay import
+        addresses are IAT slot addresses (``address_kind="iat_slot_va"``).
+        Delay descriptors parsed in "va" mode report
+        ``resolution_mode == "va"``; their pointer fields were normalised to
+        RVAs before use and the reported slot address is ImageBase + the
+        normalised slot RVA.
+
+        A damaged directory only removes that directory's own results; records
+        already confirmed in the other directories remain in the report, and
+        the reason for each unresolved record is locatable via
+        ``diagnostics`` and each record's ``reason``/``detail``.
+        """
+        entries = []
+        sources = {}
+        for name in ("import", "delay_import", "bound_import"):
+            sources[name] = dict(
+                self.__dependency_sources__.get(
+                    name,
+                    {
+                        "directory": name,
+                        "absent": True,
+                        "parsed": False,
+                        "entry_count": 0,
+                    },
+                )
+            )
+
+        def decode_name(value):
+            if value is None:
+                return None
+            if isinstance(value, (bytes, bytearray)):
+                return value.decode("ascii", "backslashreplace")
+            return value
+
+        import_descs = getattr(self, "DIRECTORY_ENTRY_IMPORT", [])
+        for module in import_descs:
+            for symbol in module.imports:
+                name = None if symbol.name == b"*invalid*" else decode_name(symbol.name)
+                resolved = name is not None or symbol.import_by_ordinal
+                entries.append(
+                    DependencyEvidence(
+                        directory="import",
+                        kind="symbol",
+                        dll=decode_name(module.dll),
+                        dll_valid=module.dll != b"*invalid*",
+                        name=name,
+                        ordinal=symbol.ordinal,
+                        hint=symbol.hint,
+                        address=symbol.address,
+                        address_kind="iat_slot_va",
+                        address_base="image_base",
+                        time_date_stamp=None,
+                        timestamp_trusted=None,
+                        resolution_mode="rva",
+                        thunk_rva=symbol.thunk_rva,
+                        thunk_offset=symbol.thunk_offset,
+                        bound=symbol.bound,
+                        resolved=resolved,
+                        reason=None if resolved else "invalid_symbol_name",
+                        detail=(
+                            None
+                            if resolved
+                            else "symbol name was rejected as invalid"
+                        ),
+                    )
+                )
+
+        delay_descs = getattr(self, "DIRECTORY_ENTRY_DELAY_IMPORT", [])
+        for module in delay_descs:
+            mode = getattr(module, "resolution_mode", "rva")
+            # Legacy VA-mode descriptors store absolute addresses; expose the
+            # interpretation so a report can never present them as RVAs.
+            for symbol in module.imports:
+                name = None if symbol.name == b"*invalid*" else decode_name(symbol.name)
+                resolved = name is not None or symbol.import_by_ordinal
+                # pIAT has already been normalised to an RVA in both modes;
+                # symbol.address is ImageBase + pIAT + slot index, never the
+                # raw VA-mode descriptor field taken as an RVA.
+                entries.append(
+                    DependencyEvidence(
+                        directory="delay_import",
+                        kind="symbol",
+                        dll=decode_name(module.dll),
+                        dll_valid=module.dll != b"*invalid*",
+                        name=name,
+                        ordinal=symbol.ordinal,
+                        hint=symbol.hint,
+                        address=symbol.address,
+                        address_kind="iat_slot_va",
+                        address_base="image_base",
+                        time_date_stamp=None,
+                        timestamp_trusted=None,
+                        resolution_mode=mode,
+                        thunk_rva=symbol.thunk_rva,
+                        thunk_offset=symbol.thunk_offset,
+                        bound=symbol.bound,
+                        resolved=resolved,
+                        reason=None if resolved else "invalid_symbol_name",
+                        detail=(
+                            None
+                            if resolved
+                            else "symbol name was rejected as invalid"
+                        ),
+                    )
+                )
+
+        bound_descs = getattr(self, "DIRECTORY_ENTRY_BOUND_IMPORT", [])
+        for module in bound_descs:
+            # TimeDateStamp is kept as untrusted metadata only. It is never
+            # used to identify the DLL nor to correlate it with imports.
+            timestamp = getattr(module.struct, "TimeDateStamp", None)
+            entries.append(
+                DependencyEvidence(
+                    directory="bound_import",
+                    kind="dll_descriptor",
+                    dll=decode_name(module.name),
+                    dll_valid=module.name is not None,
+                    name=None,
+                    ordinal=None,
+                    hint=None,
+                    address=None,
+                    address_kind="none",
+                    address_base="not_an_address",
+                    time_date_stamp=timestamp,
+                    timestamp_trusted=False,
+                    resolution_mode="not_applicable",
+                    thunk_rva=None,
+                    thunk_offset=module.struct.get_file_offset(),
+                    bound=None,
+                    resolved=True,
+                    reason=None,
+                    detail=(
+                        "bound descriptor names a DLL; its timestamp is untrusted "
+                        "metadata, not a DLL identity"
+                    ),
+                )
+            )
+            for ref in module.entries:
+                ref_timestamp = getattr(ref.struct, "TimeDateStamp", None)
+                entries.append(
+                    DependencyEvidence(
+                        directory="bound_import",
+                        kind="dll_descriptor",
+                        dll=decode_name(ref.name),
+                        dll_valid=ref.name is not None,
+                        name=None,
+                        ordinal=None,
+                        hint=None,
+                        address=None,
+                        address_kind="none",
+                        address_base="not_an_address",
+                        time_date_stamp=ref_timestamp,
+                        timestamp_trusted=False,
+                        resolution_mode="not_applicable",
+                        thunk_rva=None,
+                        thunk_offset=ref.struct.get_file_offset(),
+                        bound=None,
+                        resolved=True,
+                        reason=None,
+                        detail=(
+                            "bound forwarder reference names a DLL; its timestamp "
+                            "is untrusted metadata, not a DLL identity"
+                        ),
+                    )
+                )
+
+        # Skipped thunk entries are reported as their own unresolved records so
+        # that a bad pointer does not silently vanish from the evidence.
+        descriptor_dlls = {}
+        for module in import_descs:
+            descriptor_dlls[("import", module.struct.get_file_offset())] = (
+                decode_name(module.dll),
+                "rva",
+            )
+        for module in delay_descs:
+            descriptor_dlls[
+                ("delay_import", module.struct.get_file_offset())
+            ] = (
+                decode_name(module.dll),
+                getattr(module, "resolution_mode", "rva"),
+            )
+        for diagnostic in self.__dependency_diagnostics__:
+            if diagnostic.get("thunk_rva") is None:
+                continue
+            context = diagnostic.get("context") or {}
+            key = (diagnostic.get("directory"), context.get("descriptor_offset"))
+            dll, mode = descriptor_dlls.get(key, (None, None))
+            if dll is None and context.get("dll_name_rva") is not None:
+                try:
+                    dll = decode_name(
+                        self.get_string_at_rva(
+                            context["dll_name_rva"], MAX_DLL_LENGTH
+                        )
+                    )
+                except PEFormatError:
+                    dll = None
+            entries.append(
+                DependencyEvidence(
+                    directory=diagnostic.get("directory"),
+                    kind="symbol",
+                    dll=dll,
+                    dll_valid=dll is not None and dll != "*invalid*",
+                    name=None,
+                    ordinal=None,
+                    hint=None,
+                    address=diagnostic.get("address_of_data"),
+                    address_kind="unresolved_thunk_pointer",
+                    address_base="unknown",
+                    time_date_stamp=None,
+                    timestamp_trusted=None,
+                    resolution_mode=mode or diagnostic.get("resolution_mode"),
+                    thunk_rva=diagnostic.get("thunk_rva"),
+                    thunk_offset=diagnostic.get("thunk_offset"),
+                    bound=None,
+                    resolved=False,
+                    reason=diagnostic.get("reason"),
+                    detail=diagnostic.get("detail"),
+                )
+            )
+
+        by_dll = {}
+        for entry in entries:
+            if entry.dll is None:
+                continue
+            by_dll.setdefault(entry.dll.lower(), []).append(entry)
+
+        return DependencyEvidenceReport(
+            entries=entries,
+            by_dll=by_dll,
+            sources=sources,
+            diagnostics=list(self.__dependency_diagnostics__),
+        )
 
     def get_import_table(self, rva, max_length=None, contains_addresses=False):
         # We need the ordinal flag for a simple heuristic
