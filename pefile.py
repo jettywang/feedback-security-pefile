@@ -103,6 +103,11 @@ MAX_RESOURCE_DEPTH = 32
 # Limit number of exported symbols
 MAX_SYMBOL_EXPORT_COUNT = 0x2000
 
+# Maximum number of TLS callback array entries to walk when statically
+# analyzing the TLS directory. A well-formed array is zero-terminated long
+# before this limit; reaching it means the terminator is missing.
+MAX_TLS_CALLBACKS = 0x1000
+
 MIN_VALID_FILE_ALIGNMENT = 0x200
 SECTOR_SIZE = 0x200
 
@@ -1781,6 +1786,50 @@ class TlsData(DataContainer):
     """Holds TLS information.
 
     struct:     IMAGE_TLS_DIRECTORY structure
+    """
+
+
+class TlsCallbackData(DataContainer):
+    """Holds the static analysis of one TLS callback array entry.
+
+    index:              position of the entry within the callback array
+    slot_rva:           RVA of the array slot holding this pointer
+    slot_file_offset:   file offset of the slot, None if it lies in
+                        zero-filled section space
+    raw:                raw pointer-width bytes of the slot as stored in
+                        the file, None if not backed by file contents
+    va:                 callback target exactly as stored (a VA per the PE
+                        format specification)
+    rva:                target RVA (va - ImageBase)
+    file_offset:        file offset the target maps to, None if it is not
+                        backed by file contents
+    in_image:           True if the target RVA falls within SizeOfImage
+    in_zero_fill:       True if the target lies in a section's zero-filled
+                        tail (past SizeOfRawData)
+    duplicate:          True if the same target VA already appeared earlier
+                        in the array
+    section_name:       name of the section containing the target, if any
+    permissions:        dict with the read/write/execute flags of the
+                        containing section, None if there is none
+    executable:         execute permission of the containing section, None
+                        when the target cannot be verified against any
+                        section (nothing is claimed about such targets)
+    """
+
+
+class TlsCallbacksData(DataContainer):
+    """Static view of the TLS callback array.
+
+    struct:             IMAGE_TLS_DIRECTORY structure
+    callbacks_va:       AddressOfCallBacks exactly as stored (a VA)
+    callbacks_rva:      RVA of the callback array (callbacks_va - ImageBase)
+    pointer_size:       width in bytes of each array entry (4 or 8)
+    callbacks:          list of TlsCallbackData
+    truncated:          True if the walk ended without finding the zero
+                        terminator
+    truncation_reason:  "limit" (terminator missing within the traversal
+                        limit) or "unreadable" (a slot could not be mapped
+                        to file contents) when truncated, else None
     """
 
 
@@ -4065,6 +4114,144 @@ class PE:
             return None
 
         return TlsData(struct=tls_struct)
+
+    def get_tls_callbacks(self, max_callbacks=MAX_TLS_CALLBACKS):
+        """Statically walk the TLS callback array.
+
+        This is a read-only view for static analysis: nothing is loaded,
+        relocated into memory, or executed. The array location and every
+        entry are interpreted according to the PE format specification:
+        ``AddressOfCallBacks`` and the array entries are VAs, so the
+        corresponding RVAs are obtained by subtracting the current
+        ImageBase. Entry width follows the PE type (4 bytes for PE32,
+        8 bytes for PE32+).
+
+        The walk stops at the first zero entry (the terminator), at
+        ``max_callbacks`` entries, or when a slot cannot be mapped to file
+        contents. The latter two cases set ``truncated`` and
+        ``truncation_reason`` in the result.
+
+        Returns a TlsCallbacksData instance, or None if the file has no
+        TLS directory or no callback array.
+        """
+
+        tls_entry = getattr(self, "DIRECTORY_ENTRY_TLS", None)
+        if tls_entry is None or tls_entry.struct is None:
+            return None
+
+        callbacks_va = tls_entry.struct.AddressOfCallBacks
+        if not callbacks_va:
+            return None
+
+        pointer_size = 8 if self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE_PLUS else 4
+        image_base = self.OPTIONAL_HEADER.ImageBase
+        callbacks_rva = callbacks_va - image_base
+
+        result = TlsCallbacksData(
+            struct=tls_entry.struct,
+            callbacks_va=callbacks_va,
+            callbacks_rva=callbacks_rva,
+            pointer_size=pointer_size,
+            callbacks=[],
+            truncated=False,
+            truncation_reason=None,
+        )
+
+        seen_targets = set()
+        size_of_image = self.OPTIONAL_HEADER.SizeOfImage
+
+        for index in range(max_callbacks):
+            slot_rva = callbacks_rva + index * pointer_size
+            value, raw, slot_file_offset = self.__read_tls_callback_slot(
+                slot_rva, pointer_size
+            )
+            if value is None:
+                result.truncated = True
+                result.truncation_reason = "unreadable"
+                break
+            if value == 0:
+                # Zero terminator: the normal end of the array. Slots in
+                # zero-filled section space also read as zero.
+                break
+
+            target_rva = value - image_base
+            section = self.get_section_by_rva(target_rva) if target_rva >= 0 else None
+
+            in_zero_fill = False
+            target_file_offset = None
+            section_name = None
+            permissions = None
+            executable = None
+            if section is not None:
+                section_name = section.get_name()
+                offset_in_section = target_rva - section.get_VirtualAddress_adj()
+                in_zero_fill = offset_in_section >= section.SizeOfRawData
+                if not in_zero_fill:
+                    target_file_offset = section.get_offset_from_rva(target_rva)
+                permissions = {
+                    "read": bool(getattr(section, "IMAGE_SCN_MEM_READ", False)),
+                    "write": bool(getattr(section, "IMAGE_SCN_MEM_WRITE", False)),
+                    "execute": bool(getattr(section, "IMAGE_SCN_MEM_EXECUTE", False)),
+                }
+                executable = permissions["execute"]
+
+            result.callbacks.append(
+                TlsCallbackData(
+                    index=index,
+                    slot_rva=slot_rva,
+                    slot_file_offset=slot_file_offset,
+                    raw=raw,
+                    va=value,
+                    rva=target_rva,
+                    file_offset=target_file_offset,
+                    in_image=0 <= target_rva < size_of_image,
+                    in_zero_fill=in_zero_fill,
+                    duplicate=value in seen_targets,
+                    section_name=section_name,
+                    permissions=permissions,
+                    executable=executable,
+                )
+            )
+            seen_targets.add(value)
+        else:
+            # The terminator was not found within the traversal limit.
+            result.truncated = True
+            result.truncation_reason = "limit"
+
+        return result
+
+    def __read_tls_callback_slot(self, rva, pointer_size):
+        """Read one pointer-sized TLS callback array slot.
+
+        Returns a (value, raw_bytes, file_offset) tuple. ``value`` is None
+        when the slot cannot be mapped to file contents. Slots lying in a
+        section's zero-filled tail read as zero and have neither raw bytes
+        nor a file offset.
+        """
+
+        if rva < 0:
+            return None, None, None
+
+        section = self.get_section_by_rva(rva)
+        if section is not None:
+            offset_in_section = rva - section.get_VirtualAddress_adj()
+            if offset_in_section >= section.SizeOfRawData:
+                # The loader zero-fills the section tail past SizeOfRawData,
+                # so the slot reads as zero and has no file bytes.
+                return 0, None, None
+            file_offset = section.get_offset_from_rva(rva)
+        else:
+            try:
+                file_offset = self.get_offset_from_rva(rva)
+            except PEFormatError:
+                return None, None, None
+
+        raw = bytes(self.__data__[file_offset : file_offset + pointer_size])
+        if len(raw) != pointer_size:
+            return None, None, None
+
+        format = "<Q" if pointer_size == 8 else "<I"
+        return struct.unpack_from(format, raw)[0], raw, file_offset
 
     def parse_directory_load_config(self, rva, size):
         """Parse the load configuration table."""
