@@ -106,6 +106,10 @@ MAX_SYMBOL_EXPORT_COUNT = 0x2000
 MIN_VALID_FILE_ALIGNMENT = 0x200
 SECTOR_SIZE = 0x200
 
+# Upper bound for bytes materialized by the evidence-based RVA mapping API.
+# Ranges are reported in full; only the returned byte sample is capped.
+MAX_RVA_MAPPING_DATA = 0x10000
+
 IMAGE_DOS_SIGNATURE = 0x5A4D
 IMAGE_DOSZM_SIGNATURE = 0x4D5A
 
@@ -1538,6 +1542,390 @@ class DataContainer:
         bare_setattr = super().__setattr__
         for key, value in kwargs.items():
             bare_setattr(key, value)
+
+
+def _mapping_sort_value(value):
+    if value is None:
+        return ()
+    if isinstance(value, tuple):
+        return value
+    return (value,)
+
+
+def _candidates_conflict_on_bytes(left, right):
+    """Compare candidates only where their covered ranges overlap.
+
+    Bytes that only one candidate covers are not evidence of a conflict; for
+    example a zero-fill range and a raw-only tail can be adjacent.
+    """
+
+    overlap_start = max(left.covered_range[0], right.covered_range[0])
+    overlap_end = min(left.covered_range[1], right.covered_range[1])
+    if overlap_start >= overlap_end:
+        return False
+
+    left_offset = overlap_start - left.covered_range[0]
+    right_offset = overlap_start - right.covered_range[0]
+    length = overlap_end - overlap_start
+    return (
+        left.data[left_offset : left_offset + length]
+        != right.data[right_offset : right_offset + length]
+    )
+
+
+def _rva_candidate_sort_key(candidate):
+    """Stable ordering that does not depend on the section table order.
+
+    The section index and the section header's file offset are deliberately
+    excluded: both change when the table entries are reordered, while the
+    evidence they describe does not.  ``candidate.signature`` is used last as
+    a complete deterministic tie breaker.
+    """
+    kind_rank = {"header": 0, "section": 1, "file_offset": 2}.get(
+        candidate.kind, 3
+    )
+    return (
+        kind_rank,
+        candidate.address_basis,
+        _mapping_sort_value(
+            candidate.span_range[0] if candidate.span_range else None
+        ),
+        _mapping_sort_value(candidate.virtual_address),
+        _mapping_sort_value(candidate.pointer_to_raw_data),
+        _mapping_sort_value(candidate.virtual_size),
+        _mapping_sort_value(candidate.size_of_raw_data),
+        candidate.section_name or b"",
+        _mapping_sort_value(candidate.declared_raw_range),
+        _mapping_sort_value(candidate.file_range),
+        _mapping_sort_value(candidate.zero_fill_range),
+        _mapping_sort_value(candidate.zero_fill_extent),
+        _mapping_sort_value(candidate.missing_file_range),
+        _mapping_sort_value(candidate.raw_only_range),
+        candidate.flags,
+        candidate.data,
+        candidate.truncated,
+        # repr() gives a total order even though the signature mixes
+        # None, tuples, bytes and ints.
+        repr(candidate.signature),
+    )
+
+
+class RVAMappingCandidate(DataContainer):
+    """One possible file/virtual explanation for an RVA span.
+
+    Candidates are produced independently for each section header (and for
+    the header region).  They are never truncated against another section,
+    so overlapping sections yield one candidate each.
+
+    kind:                       "header" or "section"
+    address_basis:              "adjusted" (pefile alignment rounding) or
+                                "declared" (VirtualAddress as written)
+    section:                    SectionStructure or None
+    section_name:               raw section name as bytes, or None
+    section_index_in_file:      zero-based position in the section table
+    section_header_offset:      file offset of the IMAGE_SECTION_HEADER
+    virtual_address:            declared VirtualAddress
+    virtual_address_adjusted:   VirtualAddress after pefile's alignment rules
+    pointer_to_raw_data:        declared PointerToRawData
+    pointer_to_raw_data_adjusted:
+                                PointerToRawData after pefile's alignment rules
+    virtual_size:               declared Misc_VirtualSize
+    size_of_raw_data:           declared SizeOfRawData
+    characteristics:            declared section Characteristics
+    span_range:                 (start, end) RVA span this candidate claims
+                                (aligned VirtualAddress through
+                                max(VirtualSize, SizeOfRawData))
+    virtual_range:              (start, end) declared virtual extent
+                                (aligned VirtualAddress + VirtualSize)
+    covered_range:              (start, end) covered by the requested query
+    file_offset:                file offset of the queried RVA, or None when
+                                the queried byte(s) are virtual zero fill
+    file_range:                 (start, end) of file bytes used for the query
+    section_raw_range:          (start, end) of the section's raw data, as
+                                present in the file (possibly clipped)
+    declared_raw_range:         (start, end) as declared (not clipped)
+    zero_fill_range:            (start, end) of the queried span backed by
+                                virtual zeros
+    zero_fill_extent:           (start, end) full declared virtual zero-fill
+                                region of the section, independent of the
+                                query
+    missing_file_range:         (start, end) RVA range declared as raw data
+                                but absent past the end of the file
+    raw_only_range:             (start, end) RVA range covered by raw data
+                                that VirtualSize does not include
+    data:                       bytes for covered_range; file bytes followed
+                                by zeros when applicable
+    flags:                      tuple of per-candidate evidence codes
+    truncated:                  True when covered_range ends before the
+                                requested range ends
+    """
+
+    def __init__(self, **kwargs):
+        defaults = {
+            "kind": "section",
+            "address_basis": "adjusted",
+            "section": None,
+            "section_name": None,
+            "section_index_in_file": None,
+            "section_header_offset": None,
+            "virtual_address": None,
+            "virtual_address_adjusted": None,
+            "pointer_to_raw_data": None,
+            "pointer_to_raw_data_adjusted": None,
+            "virtual_size": None,
+            "size_of_raw_data": None,
+            "characteristics": None,
+            "span_range": None,
+            "virtual_range": None,
+            "covered_range": None,
+            "file_offset": None,
+            "file_range": None,
+            "section_raw_range": None,
+            "declared_raw_range": None,
+            "zero_fill_range": None,
+            "zero_fill_extent": None,
+            "missing_file_range": None,
+            "raw_only_range": None,
+            "data": b"",
+            "flags": (),
+            "truncated": False,
+        }
+        defaults.update(kwargs)
+        defaults["data"] = bytes(defaults["data"] or b"")
+        defaults["flags"] = tuple(defaults["flags"])
+        super().__init__(**defaults)
+
+    @property
+    def raw_file_range(self):
+        """Alias for ``file_range``: raw bytes used for the queried RVA."""
+        return self.file_range
+
+    @property
+    def virtual_zero_fill_range(self):
+        """Alias for ``zero_fill_range``."""
+        return self.zero_fill_range
+
+    @property
+    def file_backed(self):
+        return self.file_range is not None
+
+    @property
+    def zero_filled(self):
+        return self.zero_fill_range is not None
+
+    @property
+    def signature(self):
+        """Order-independent identity of this candidate's evidence."""
+        return (
+            self.kind,
+            self.address_basis,
+            self.section_name,
+            self.virtual_address,
+            self.virtual_address_adjusted,
+            self.pointer_to_raw_data,
+            self.pointer_to_raw_data_adjusted,
+            self.virtual_size,
+            self.size_of_raw_data,
+            self.characteristics,
+            self.span_range,
+            self.virtual_range,
+            self.covered_range,
+            self.file_range,
+            self.section_raw_range,
+            self.declared_raw_range,
+            self.zero_fill_range,
+            self.zero_fill_extent,
+            self.missing_file_range,
+            self.raw_only_range,
+            self.data,
+            self.flags,
+            self.truncated,
+        )
+
+    def __eq__(self, other):
+        if not isinstance(other, RVAMappingCandidate):
+            return NotImplemented
+        return self.signature == other.signature
+
+    def __hash__(self):
+        return hash(self.signature)
+
+    def __repr__(self):
+        return (
+            f"RVAMappingCandidate(kind={self.kind!r}, "
+            f"basis={self.address_basis!r}, "
+            f"section={self.section_name!r}, "
+            f"file_offset={self.file_offset!r}, "
+            f"file_range={self.file_range!r}, "
+            f"zero_fill_range={self.zero_fill_range!r}, "
+            f"missing_file_range={self.missing_file_range!r}, "
+            f"flags={self.flags!r})"
+        )
+
+    def keys(self):
+        return tuple(vars(self).keys())
+
+    def __getitem__(self, key):
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key) from None
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+    def items(self):
+        return tuple((key, getattr(self, key)) for key in self.keys())
+
+    def as_dict(self):
+        return {key: getattr(self, key) for key in self.keys()}
+
+    def to_dict(self):
+        return self.as_dict()
+
+
+class RVAMapping(DataContainer):
+    """Evidence for every interpretation of an RVA span.
+
+    rva:                    requested RVA
+    length:                 effective length used for range calculations
+    requested_range:        (rva, rva + length)
+    candidates:             tuple of RVAMappingCandidate, ordered by a key
+                            that is independent of the section table order
+    reasons:                tuple of ambiguity/evidence reason codes
+    details:                human-readable explanations, order-independent
+    fallback_file_offset:   the identity mapping pefile's legacy lookup would
+                            use when no candidate exists (not loader evidence)
+    inside_file:            whether the RVA is below the file size
+    inside_image:           whether the RVA is below SizeOfImage
+
+    Common reason codes include "overlapping_sections",
+    "header_section_overlap", "ambiguous_mapping", "conflicting_bytes",
+    "virtual_zero_fill", "zero_fill_versus_raw",
+    "virtual_size_exceeds_raw_size", "raw_size_exceeds_virtual_size",
+    "unaligned_section_geometry", "raw_data_beyond_eof",
+    "candidate_span_truncated", "outside_sections", "identity_fallback",
+    "rva_beyond_size_of_image", "empty_query", "size_of_headers_mismatch",
+    "file_data_missing", and the directory-specific "directory_empty",
+    "directory_rva_out_of_bounds", "directory_rva_outside_sections",
+    "directory_span_truncated", "directory_file_data_missing",
+    "directory_beyond_size_of_image" and "directory_ambiguous".
+    """
+
+    def __init__(self, **kwargs):
+        kwargs["candidates"] = tuple(
+            sorted(kwargs.get("candidates", ()), key=_rva_candidate_sort_key)
+        )
+        kwargs.setdefault("reasons", ())
+        kwargs.setdefault("details", ())
+        kwargs["reasons"] = tuple(kwargs["reasons"])
+        kwargs["details"] = tuple(kwargs["details"])
+        super().__init__(**kwargs)
+
+    @property
+    def ambiguous(self):
+        """True when more than one candidate interprets the queried span."""
+        return len(self.candidates) > 1
+
+    @property
+    def conflicting_bytes(self):
+        """True when candidates disagree about overlapping bytes.
+
+        Only the part of the requested span covered by two or more candidates
+        is compared; bytes that only one candidate covers are not a conflict.
+        """
+        return any(
+            _candidates_conflict_on_bytes(left, right)
+            for index, left in enumerate(self.candidates)
+            for right in self.candidates[index + 1 :]
+        )
+
+    @property
+    def file_offsets(self):
+        return tuple(
+            candidate.file_offset
+            for candidate in self.candidates
+            if candidate.file_offset is not None
+        )
+
+    @property
+    def unique_file_offset(self):
+        """The sole file offset, or None unless there is one interpretation.
+
+        Multiple candidates mean multiple interpretations, even when they
+        happen to agree on bytes and offset, so no single offset is asserted.
+        A zero-fill-only, truncated, or partially missing candidate also
+        makes the interpretation non-unique.
+        """
+        candidate = self.unique_candidate
+        if candidate is None:
+            return None
+        if candidate.covered_range != self.requested_range or candidate.truncated:
+            return None
+        if (
+            candidate.file_range is None
+            or candidate.zero_fill_range is not None
+            or candidate.missing_file_range is not None
+        ):
+            return None
+        return candidate.file_offset
+
+    @property
+    def unique_candidate(self):
+        """The sole candidate when its bytes are the only interpretation."""
+        if len(self.candidates) == 1:
+            return self.candidates[0]
+        return None
+
+    @property
+    def signatures(self):
+        return tuple(candidate.signature for candidate in self.candidates)
+
+    @property
+    def candidate_sections(self):
+        """Sections offering an interpretation, ordered independently."""
+        return tuple(
+            candidate.section
+            for candidate in self.candidates
+            if candidate.section is not None
+        )
+
+    @property
+    def ambiguity_reasons(self):
+        """Alias for ``reasons``."""
+        return self.reasons
+
+    @property
+    def raw_file_ranges(self):
+        return tuple(candidate.file_range for candidate in self.candidates)
+
+    @property
+    def virtual_zero_fill_ranges(self):
+        return tuple(candidate.zero_fill_range for candidate in self.candidates)
+
+    @property
+    def unique_file_offsets(self):
+        return set(self.file_offsets)
+
+    def as_dict(self):
+        return {
+            "rva": self.rva,
+            "length": self.length,
+            "requested_range": self.requested_range,
+            "candidates": tuple(candidate.as_dict() for candidate in self.candidates),
+            "reasons": self.reasons,
+            "details": self.details,
+            "fallback_file_offset": self.fallback_file_offset,
+            "inside_file": self.inside_file,
+            "inside_image": self.inside_image,
+        }
+
+    def __repr__(self):
+        return (
+            f"RVAMapping(rva={self.rva:#x}, length={self.length}, "
+            f"candidates={len(self.candidates)}, "
+            f"reasons={self.reasons!r})"
+        )
 
 
 class ImportDescData(DataContainer):
@@ -6459,6 +6847,11 @@ class PE:
 
         Given a RVA, this method will find the section where the
         data lies and return the offset within the file.
+
+        This is the legacy fast single-value lookup. It returns the first
+        section (in parsed order) whose ``contains_rva()`` accepts the RVA and
+        therefore cannot represent overlapping or zero-filled interpretations.
+        Use :meth:`get_rva_mapping` when the ambiguity matters.
         """
 
         s = self.get_section_by_rva(rva)
@@ -6473,6 +6866,618 @@ class PE:
             raise PEFormatError(f"data at RVA {rva:#x} can't be fetched")
 
         return s.get_offset_from_rva(rva)
+
+    @staticmethod
+    def _intersect_range(start, end, region):
+        if region is None:
+            return None
+        region_start, region_end = region
+        clipped_start = max(start, region_start)
+        clipped_end = min(end, region_end)
+        if clipped_start >= clipped_end:
+            return None
+        return (clipped_start, clipped_end)
+
+    def _rva_mapping_section_candidate(
+        self, section, rva, end, address_basis="adjusted"
+    ):
+        """Build one independent section interpretation for ``[rva, end)``.
+
+        The calculation only uses the section's own header values.  In
+        particular it does not consult ``next_section_virtual_address``, so
+        two overlapping sections each keep their own candidate.
+
+        ``address_basis`` selects where the section is assumed to start:
+        ``"adjusted"`` uses pefile's alignment rounding, ``"declared"`` uses
+        the VirtualAddress as written in the header.  When the two differ this
+        method is called once per basis, because both are real static
+        interpretations of the same file.
+
+        Four RVA regions are distinguished:
+
+        * raw bytes physically present in the file,
+        * raw bytes declared by SizeOfRawData but missing past EOF,
+        * virtual zero fill declared by VirtualSize, and
+        * a raw-only tail when SizeOfRawData exceeds VirtualSize.
+        """
+
+        virtual_address = section.VirtualAddress
+        virtual_address_adjusted = section.get_VirtualAddress_adj()
+        if address_basis == "declared":
+            span_start = virtual_address
+        else:
+            span_start = virtual_address_adjusted
+        pointer_to_raw_data = section.PointerToRawData
+        pointer_to_raw_data_adjusted = section.get_PointerToRawData_adj()
+        virtual_size = int(section.Misc_VirtualSize or 0)
+        raw_size = int(section.SizeOfRawData or 0)
+
+        span_end = span_start + max(virtual_size, raw_size)
+        virtual_end = span_start + virtual_size
+
+        covered_start = max(rva, span_start)
+        covered_end = min(end, span_end)
+        if covered_start >= covered_end:
+            return None
+
+        if pointer_to_raw_data_adjusted is None:
+            present_raw_length = 0
+            declared_raw_range = None
+            section_raw_range = None
+        else:
+            if pointer_to_raw_data is not None:
+                declared_raw_range = (
+                    pointer_to_raw_data,
+                    pointer_to_raw_data + raw_size,
+                )
+            else:
+                declared_raw_range = None
+            section_raw_range = (
+                pointer_to_raw_data_adjusted,
+                max(
+                    pointer_to_raw_data_adjusted,
+                    min(
+                        pointer_to_raw_data_adjusted + raw_size,
+                        len(self.__data__),
+                    ),
+                ),
+            )
+            present_raw_length = min(
+                raw_size, max(0, len(self.__data__) - pointer_to_raw_data_adjusted)
+            )
+
+        present_end = span_start + present_raw_length
+        missing_end = span_start + raw_size
+
+        raw_backed_range = (span_start, present_end)
+        missing_file_range = (
+            (present_end, missing_end) if present_end < missing_end else None
+        )
+        zero_fill_range = (
+            (missing_end, virtual_end) if missing_end < virtual_end else None
+        )
+        # Raw bytes beyond VirtualSize: on disk but outside the declared
+        # virtual extent.  Clip to what is physically present so that
+        # raw_only_range and missing_file_range stay disjoint.
+        raw_only_range = None
+        if virtual_end < span_end:
+            raw_only_start = max(virtual_end, span_start)
+            raw_only_end = min(span_end, present_end)
+            if raw_only_start < raw_only_end:
+                raw_only_range = (raw_only_start, raw_only_end)
+
+        raw_covered = self._intersect_range(
+            covered_start, covered_end, raw_backed_range
+        )
+        file_range = None
+        if raw_covered is not None and pointer_to_raw_data_adjusted is not None:
+            file_range = (
+                pointer_to_raw_data_adjusted + (raw_covered[0] - span_start),
+                pointer_to_raw_data_adjusted + (raw_covered[1] - span_start),
+            )
+        file_offset = None
+        if (
+            span_start <= rva < present_end
+            and pointer_to_raw_data_adjusted is not None
+        ):
+            file_offset = pointer_to_raw_data_adjusted + (rva - span_start)
+
+        missing_covered = self._intersect_range(
+            covered_start, covered_end, missing_file_range
+        )
+        zero_fill_covered = self._intersect_range(
+            covered_start, covered_end, zero_fill_range
+        )
+        raw_only_covered = self._intersect_range(
+            covered_start, covered_end, raw_only_range
+        )
+
+        flags = []
+        if address_basis == "declared":
+            flags.append("address_basis_declared")
+        else:
+            flags.append("address_basis_adjusted")
+        if virtual_address != virtual_address_adjusted:
+            flags.append("virtual_address_rounded_down")
+        if (
+            pointer_to_raw_data is not None
+            and pointer_to_raw_data_adjusted is not None
+            and pointer_to_raw_data != pointer_to_raw_data_adjusted
+        ):
+            flags.append("pointer_to_raw_data_rounded_down")
+
+        section_alignment = self.OPTIONAL_HEADER.SectionAlignment
+        file_alignment = self.OPTIONAL_HEADER.FileAlignment
+        if (
+            section_alignment
+            and virtual_address is not None
+            and virtual_address % section_alignment
+        ):
+            flags.append("virtual_address_misaligned")
+        if (
+            file_alignment
+            and pointer_to_raw_data is not None
+            and pointer_to_raw_data % file_alignment
+        ):
+            flags.append("pointer_to_raw_data_misaligned")
+
+        if virtual_size == 0:
+            flags.append("virtual_size_zero")
+        if virtual_size > raw_size:
+            flags.append("virtual_size_exceeds_raw_size")
+        if raw_size > virtual_size:
+            flags.append("raw_size_exceeds_virtual_size")
+        if zero_fill_covered is not None:
+            flags.append("virtual_zero_fill")
+        if missing_file_range is not None:
+            flags.append("raw_data_beyond_eof")
+        if missing_covered is not None:
+            flags.append("file_data_missing")
+        if pointer_to_raw_data is None:
+            flags.append("raw_pointer_unavailable")
+
+        # Materialize a bounded sample for the covered span.  Missing raw
+        # bytes are filled with zeroes only as a sample convenience; the
+        # file_data_missing flag and missing_file_range say they were not
+        # physically present in the file.
+        sample_start = covered_start
+        sample_end = covered_end
+        data_truncated = False
+        if sample_end - sample_start > MAX_RVA_MAPPING_DATA:
+            sample_end = sample_start + MAX_RVA_MAPPING_DATA
+            data_truncated = True
+
+        data = bytearray()
+        cursor = sample_start
+        present_sample_end = min(sample_end, present_end)
+        if cursor < present_sample_end:
+            raw_from = pointer_to_raw_data_adjusted + (cursor - span_start)
+            raw_to = raw_from + (present_sample_end - cursor)
+            data.extend(self.__data__[raw_from:raw_to])
+            cursor = present_sample_end
+        if cursor < min(sample_end, virtual_end):
+            data.extend(b"\x00" * (min(sample_end, virtual_end) - cursor))
+            cursor = min(sample_end, virtual_end)
+        if cursor < min(sample_end, present_end):
+            raw_from = pointer_to_raw_data_adjusted + (cursor - span_start)
+            raw_to = raw_from + (min(sample_end, present_end) - cursor)
+            data.extend(self.__data__[raw_from:raw_to])
+            cursor = min(sample_end, present_end)
+        if cursor < sample_end:
+            # Bytes neither physically present nor declared as virtual zero
+            # fill (raw tail past VirtualSize and past EOF).  Keep the sample
+            # length aligned with covered_range; the missing_file_range and
+            # raw_data_beyond_eof evidence records the absence.
+            data.extend(b"\x00" * (sample_end - cursor))
+
+        if data_truncated:
+            flags.append("data_truncated")
+
+        truncated = covered_end < end
+
+        return RVAMappingCandidate(
+            kind="section",
+            address_basis=address_basis,
+            section=section,
+            section_name=section.Name.split(b"\0", 1)[0] if section.Name else None,
+            section_index_in_file=section.index_in_file,
+            section_header_offset=section.get_file_offset(),
+            virtual_address=virtual_address,
+            virtual_address_adjusted=virtual_address_adjusted,
+            pointer_to_raw_data=pointer_to_raw_data,
+            pointer_to_raw_data_adjusted=pointer_to_raw_data_adjusted,
+            virtual_size=virtual_size,
+            size_of_raw_data=raw_size,
+            characteristics=section.Characteristics,
+            span_range=(span_start, span_end),
+            virtual_range=(span_start, virtual_end),
+            covered_range=(covered_start, covered_end),
+            file_offset=file_offset,
+            file_range=file_range,
+            section_raw_range=section_raw_range,
+            declared_raw_range=declared_raw_range,
+            zero_fill_range=zero_fill_covered,
+            zero_fill_extent=zero_fill_range,
+            missing_file_range=missing_covered,
+            raw_only_range=raw_only_covered,
+            data=bytes(data),
+            flags=tuple(flags),
+            truncated=truncated,
+        )
+
+    def _rva_mapping_header_candidate(self, rva, end):
+        """Build the PE-header interpretation for ``[rva, end)``.
+
+        The header span is ``SizeOfHeaders`` as declared, widened to the
+        length of the parsed header when that is larger.  It is reported as an
+        independent candidate so an RVA claimed both by the header and by a
+        section remains visible as a conflict.
+        """
+
+        declared_size_of_headers = int(self.OPTIONAL_HEADER.SizeOfHeaders or 0)
+        parsed_header_length = len(self.header)
+        span_end = max(declared_size_of_headers, parsed_header_length)
+        if span_end <= 0:
+            return None
+
+        covered_start = max(rva, 0)
+        covered_end = min(end, span_end)
+        if covered_start >= covered_end:
+            return None
+
+        present_end = min(span_end, len(self.__data__))
+        section_raw_range = (0, max(0, present_end))
+        file_covered_start = covered_start
+        file_covered_end = min(covered_end, present_end)
+        file_range = None
+        file_offset = None
+        if file_covered_start < file_covered_end:
+            file_range = (file_covered_start, file_covered_end)
+            if rva < present_end:
+                file_offset = rva
+
+        missing_file_range = None
+        if present_end < covered_end and covered_start < span_end:
+            missing_start = max(covered_start, present_end)
+            missing_end = min(covered_end, span_end)
+            if missing_start < missing_end:
+                missing_file_range = (missing_start, missing_end)
+
+        flags = []
+        if declared_size_of_headers != parsed_header_length:
+            flags.append("size_of_headers_mismatch")
+        if len(self.__data__) < declared_size_of_headers:
+            flags.append("raw_data_beyond_eof")
+        if missing_file_range is not None:
+            flags.append("file_data_missing")
+
+        sample_end = covered_end
+        data_truncated = False
+        if sample_end - covered_start > MAX_RVA_MAPPING_DATA:
+            sample_end = covered_start + MAX_RVA_MAPPING_DATA
+            data_truncated = True
+        if data_truncated:
+            flags.append("data_truncated")
+
+        return RVAMappingCandidate(
+            kind="header",
+            section=None,
+            section_name=None,
+            section_index_in_file=None,
+            section_header_offset=None,
+            virtual_address=0,
+            virtual_address_adjusted=0,
+            pointer_to_raw_data=0,
+            pointer_to_raw_data_adjusted=0,
+            virtual_size=declared_size_of_headers,
+            size_of_raw_data=declared_size_of_headers,
+            characteristics=None,
+            virtual_range=(0, declared_size_of_headers),
+            span_range=(0, span_end),
+            covered_range=(covered_start, covered_end),
+            file_offset=file_offset,
+            file_range=file_range,
+            section_raw_range=section_raw_range,
+            declared_raw_range=(0, declared_size_of_headers),
+            zero_fill_range=None,
+            missing_file_range=missing_file_range,
+            data=bytes(self.__data__[covered_start:min(sample_end, present_end)])
+            + b"\x00" * max(0, sample_end - max(covered_start, present_end)),
+            flags=tuple(flags),
+            truncated=covered_end < end,
+        )
+
+    def get_rva_mapping(self, rva, length=1):
+        """Return evidence for every file interpretation of an RVA span.
+
+        Unlike :meth:`get_offset_from_rva`, which returns a single offset
+        chosen by section order, this method evaluates every section header
+        (and the header region) independently.  The result is a
+        :class:`RVAMapping` with a deterministic, section-order-independent
+        candidate tuple.  Each candidate records its section, declared and
+        adjusted addresses, the raw file range, the virtual zero-fill range,
+        the actual bytes and evidence flags.
+
+        ``length`` defaults to one byte.  The returned ``data`` sample per
+        candidate is capped at ``MAX_RVA_MAPPING_DATA``; the ranges are not
+        capped and the candidate is flagged ``data_truncated`` when this
+        happens.
+
+        This is a static-analysis view.  It deliberately does not emulate
+        Windows loader page mapping, section alignment rounding, or which
+        overlapping section the loader would prefer.
+        """
+
+        if rva is None:
+            raise ValueError("RVA must not be None")
+        rva = int(rva)
+        if rva < 0:
+            raise ValueError("RVA must not be negative")
+        if length is None:
+            length = 1
+        length = int(length)
+        if length < 0:
+            raise ValueError("length must not be negative")
+        end = rva + length
+
+        candidates = []
+        header_candidate = self._rva_mapping_header_candidate(rva, end)
+        if header_candidate is not None:
+            candidates.append(header_candidate)
+        for section in self.sections:
+            candidate = self._rva_mapping_section_candidate(section, rva, end)
+            if candidate is not None:
+                candidates.append(candidate)
+            if section.VirtualAddress != section.get_VirtualAddress_adj():
+                candidate = self._rva_mapping_section_candidate(
+                    section, rva, end, address_basis="declared"
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+
+        section_candidates = [c for c in candidates if c.kind == "section"]
+        reasons = []
+        details = []
+
+        if header_candidate is not None and section_candidates:
+            reasons.append("header_section_overlap")
+            details.append(
+                "The header region and "
+                f"{len(section_candidates)} section(s) all claim part of this RVA span."
+            )
+
+        claiming_sections = {
+            id(candidate.section): candidate.section_name
+            for candidate in section_candidates
+        }
+        if len(claiming_sections) > 1:
+            reasons.append("overlapping_sections")
+            details.append(
+                f"{len(claiming_sections)} section headers claim part of this "
+                "RVA span: "
+                + ", ".join(
+                    sorted(repr(name) for name in claiming_sections.values())
+                )
+                + "."
+            )
+
+        if len(candidates) > 1:
+            reasons.append("ambiguous_mapping")
+            details.append(
+                f"{len(candidates)} independent interpretations exist for "
+                f"RVA {rva:#x}..{end:#x}; no single offset is asserted."
+            )
+
+        conflicting = any(
+            _candidates_conflict_on_bytes(left, right)
+            for index, left in enumerate(candidates)
+            for right in candidates[index + 1 :]
+        )
+        if conflicting:
+            reasons.append("conflicting_bytes")
+            details.append(
+                "Candidate interpretations disagree about the actual bytes "
+                "in the overlapping part of the queried RVA span."
+            )
+
+        if any("virtual_zero_fill" in c.flags for c in candidates):
+            reasons.append("virtual_zero_fill")
+        if any(c.zero_fill_range is not None for c in candidates) and any(
+            c.file_range is not None for c in candidates
+        ):
+            reasons.append("zero_fill_versus_raw")
+            details.append(
+                "At least one interpretation is backed by file bytes while "
+                "another is only declared virtual zero fill."
+            )
+
+        if any("virtual_size_exceeds_raw_size" in c.flags for c in candidates):
+            reasons.append("virtual_size_exceeds_raw_size")
+        if any("raw_size_exceeds_virtual_size" in c.flags for c in candidates):
+            reasons.append("raw_size_exceeds_virtual_size")
+        if any(
+            {"virtual_address_rounded_down", "virtual_address_misaligned",
+             "pointer_to_raw_data_rounded_down", "pointer_to_raw_data_misaligned"}
+            & set(c.flags)
+            for c in candidates
+        ):
+            reasons.append("unaligned_section_geometry")
+        if any("raw_data_beyond_eof" in c.flags for c in candidates):
+            reasons.append("raw_data_beyond_eof")
+        if any("file_data_missing" in c.flags for c in candidates):
+            reasons.append("file_data_missing")
+        if any(c.truncated for c in candidates):
+            reasons.append("candidate_span_truncated")
+        if any("size_of_headers_mismatch" in c.flags for c in candidates):
+            reasons.append("size_of_headers_mismatch")
+
+        if not candidates:
+            reasons.append("outside_sections")
+            if rva < len(self.__data__):
+                reasons.append("identity_fallback")
+                details.append(
+                    "No section or header interprets this RVA; pefile's legacy "
+                    "lookup would use the identity file offset, which is not "
+                    "loader evidence."
+                )
+
+        size_of_image = int(self.OPTIONAL_HEADER.SizeOfImage or 0)
+        if size_of_image and rva >= size_of_image:
+            reasons.append("rva_beyond_size_of_image")
+        if length == 0:
+            reasons.append("empty_query")
+
+        fallback_file_offset = None
+        if not candidates and rva < len(self.__data__):
+            fallback_file_offset = rva
+
+        unique_reasons = tuple(dict.fromkeys(reasons))
+        unique_details = tuple(dict.fromkeys(details))
+
+        return RVAMapping(
+            rva=rva,
+            length=length,
+            requested_range=(rva, end),
+            candidates=tuple(candidates),
+            reasons=unique_reasons,
+            details=unique_details,
+            fallback_file_offset=fallback_file_offset,
+            inside_file=rva < len(self.__data__),
+            inside_image=bool(size_of_image) and rva < size_of_image,
+        )
+
+    def get_directory_mapping(self, directory):
+        """Return RVA mapping evidence for an optional-header data directory.
+
+        ``directory`` accepts the numeric index, the ``IMAGE_DIRECTORY_ENTRY_*``
+        name, or an IMAGE_DATA_DIRECTORY structure.  The returned
+        :class:`RVAMapping` additionally records ``directory_index``,
+        ``directory_name``, ``directory_rva``, ``directory_size``,
+        ``directory_in_file``, ``directory_file_ranges`` and
+        ``directory_file_range``.  Out-of-bounds and truncated directory spans
+        are reported as reasons rather than resolved to a guessed offset.
+        """
+
+        directory_index = None
+        directory_entry = None
+        if hasattr(directory, "VirtualAddress") and hasattr(directory, "Size"):
+            directory_entry = directory
+        else:
+            entries = getattr(self.OPTIONAL_HEADER, "DATA_DIRECTORY", [])
+            if isinstance(directory, str):
+                if directory not in DIRECTORY_ENTRY:
+                    raise ValueError(f"Unknown directory name: {directory}")
+                index = DIRECTORY_ENTRY[directory]
+                if 0 <= index < len(entries):
+                    directory_index = index
+                    directory_entry = entries[index]
+            else:
+                index = int(directory)
+                if not 0 <= index < len(entries):
+                    raise ValueError(f"Directory index out of range: {index}")
+                directory_index = index
+                directory_entry = entries[index]
+
+        if directory_entry is None:
+            raise ValueError("Data directory is not present")
+
+        rva = int(directory_entry.VirtualAddress)
+        size = int(directory_entry.Size)
+        directory_name = getattr(directory_entry, "name", None)
+        if directory_name is None and directory_index is not None:
+            directory_name = DIRECTORY_ENTRY.get(directory_index)
+        if directory_index is None and directory_name is not None:
+            directory_index = DIRECTORY_ENTRY.get(directory_name)
+
+        if size == 0 or rva == 0:
+            mapping = RVAMapping(
+                rva=rva,
+                length=0,
+                requested_range=(rva, rva),
+                candidates=(),
+                reasons=("directory_empty",),
+                details=("The data directory has a zero RVA or zero size.",),
+                fallback_file_offset=None,
+                inside_file=rva < len(self.__data__),
+                inside_image=bool(int(self.OPTIONAL_HEADER.SizeOfImage or 0))
+                and rva < int(self.OPTIONAL_HEADER.SizeOfImage or 0),
+            )
+            extra_reasons = ()
+            details = ()
+        else:
+            mapping = self.get_rva_mapping(rva, size)
+            extra_reasons = ()
+            details = ()
+
+            directory_end = rva + size
+            size_of_image = int(self.OPTIONAL_HEADER.SizeOfImage or 0)
+            if size_of_image and rva >= size_of_image:
+                extra_reasons += ("directory_rva_out_of_bounds",)
+                details += (
+                    f"The directory RVA {rva:#x} is outside SizeOfImage "
+                    f"{size_of_image:#x}.",
+                )
+            if not mapping.candidates:
+                extra_reasons += ("directory_rva_outside_sections",)
+                details += (
+                    "No section or header candidate interprets the directory "
+                    "RVA; no single offset is asserted.",
+                )
+            if any(candidate.truncated for candidate in mapping.candidates):
+                extra_reasons += ("directory_span_truncated",)
+                details += (
+                    "At least one candidate ends before the directory span; "
+                    "the directory extends beyond its section's declared extent.",
+                )
+            if any(
+                candidate.missing_file_range is not None
+                for candidate in mapping.candidates
+            ):
+                extra_reasons += ("directory_file_data_missing",)
+                details += (
+                    "Raw bytes for part of the directory span are declared but "
+                    "absent past the end of the file.",
+                )
+            if len(mapping.candidates) > 1:
+                extra_reasons += ("directory_ambiguous",)
+            if size_of_image and directory_end > size_of_image:
+                extra_reasons += ("directory_beyond_size_of_image",)
+                details += (
+                    f"The directory span ends at {directory_end:#x}, beyond "
+                    f"SizeOfImage {size_of_image:#x}.",
+                )
+
+        mapping.directory_index = directory_index
+        mapping.directory_name = directory_name
+        mapping.directory_rva = rva
+        mapping.directory_size = size
+        mapping.directory_in_file = any(
+            candidate.file_offset is not None for candidate in mapping.candidates
+        )
+        mapping.directory_entry = directory_entry
+        mapping.directory_file_ranges = tuple(
+            candidate.file_range
+            for candidate in mapping.candidates
+            if candidate.file_range is not None
+        )
+        mapping.directory_file_range = (
+            mapping.directory_file_ranges[0]
+            if len(mapping.directory_file_ranges) == 1
+            else None
+        )
+        mapping.reasons = tuple(
+            dict.fromkeys(mapping.reasons + tuple(extra_reasons))
+        )
+        mapping.details = tuple(dict.fromkeys(mapping.details + tuple(details)))
+        return mapping
+
+    def get_rva_mapping_evidence(self, rva, length=1):
+        """Alias for :meth:`get_rva_mapping`."""
+        return self.get_rva_mapping(rva, length)
+
+    def get_rva_candidates(self, rva, length=1):
+        """Alias for :meth:`get_rva_mapping`."""
+        return self.get_rva_mapping(rva, length)
 
     def get_string_at_rva(self, rva, max_length=MAX_STRING_LENGTH):
         """Get an ASCII string located at the given address."""

@@ -63,6 +63,48 @@ To work with authenticated binaries, including **Authenticode signatures**, plea
 
 _pefile_ runs in several pipelines scanning hundreds of thousands of new PE files every day, and, while not perfect, it has grown to be pretty robust over time. That being said, small glitches are found now and then. If you bump into a PE that does not appear to be processed correctly, do report it, please! It will help make pefile a tiny bit more powerful.
 
+## Evidence-based RVA mapping
+
+`get_offset_from_rva()` remains the fast single-value lookup. It returns the
+first section whose `contains_rva()` accepts the RVA, so overlapping sections,
+misaligned headers, and virtual zero fill can all be hidden behind one offset.
+
+For static malware analysis use `PE.get_rva_mapping(rva, length=1)`. It
+evaluates every section header and the header region independently, without
+consulting `next_section_virtual_address`, and returns an `RVAMapping` whose
+`candidates` are ordered by evidence rather than by section-table order.
+
+```python
+mapping = pe.get_rva_mapping(rva, length=0x20)
+for candidate in mapping.candidates:
+    print(candidate.section_name, candidate.file_range,
+          candidate.zero_fill_range, candidate.data[:8])
+print(mapping.reasons)
+```
+
+Each `RVAMappingCandidate` records the section, declared and adjusted
+VirtualAddress/PointerToRawData, `file_offset` (or `None` for zero fill),
+`file_range`, `section_raw_range`, `zero_fill_range`, `zero_fill_extent`,
+`missing_file_range`,
+`raw_only_range`, the bytes covered by the query, and evidence flags. The
+mapping `reasons` include `overlapping_sections`, `header_section_overlap`,
+`conflicting_bytes`, `virtual_zero_fill`, `zero_fill_versus_raw`,
+`virtual_size_exceeds_raw_size`, `raw_size_exceeds_virtual_size`,
+`unaligned_section_geometry`, `raw_data_beyond_eof`, and
+`file_data_missing`. `unique_file_offset` is populated only when exactly one
+candidate covers the whole span with fully file-backed bytes; agreeing
+candidates are still reported as multiple interpretations.
+
+`PE.get_directory_mapping(index_or_name_or_structure)` applies the same
+evidence to an optional-header data directory and reports
+`directory_empty`, `directory_rva_out_of_bounds`,
+`directory_rva_outside_sections`, `directory_span_truncated`,
+`directory_file_data_missing`, `directory_beyond_size_of_image`, and
+`directory_ambiguous`.
+
+This is a static-analysis view. It does not emulate Windows loader page
+mapping or claim to know which overlapping section the loader would prefer.
+
 ## Dependencies
 
 _pefile_ is self-contained. The module has no dependencies; it is endianness independent; and it works on Windows, macOS, and Linux.
